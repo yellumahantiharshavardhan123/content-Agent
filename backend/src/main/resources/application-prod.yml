@@ -1,0 +1,16 @@
+spring:
+  jpa:
+    show-sql: false
+
+logging:
+  level:
+    root: WARN
+    com.arjunsports.contentagent: INFO
+
+# API docs are disabled in prod by default; re-enable behind an authenticated
+# route in the Security Hardening module if external documentation access is needed.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

@@ -1,0 +1,42 @@
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Local agent tooling ---
+.claude/
+
+# --- Env ---
+.env
+.env.local
+.env.*.local
+
+# --- Backend (Java/Maven) ---
+backend/target/
+backend/.mvn/wrapper/maven-wrapper.jar
+backend/*.log
+backend/logs/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+HELP.md
+
+# --- Frontend (Node/Next.js) ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.turbo/
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# --- Docker/volumes ---
+infra/volumes/
+infra/postgres-data/
+infra/minio-data/

@@ -11,7 +11,9 @@ public enum ActivityAction {
     PUBLISH,
     SCHEDULE,
     LOGIN,
+    LOGIN_FAILED,
     LOGOUT,
+    PASSWORD_CHANGE,
     SETTINGS_CHANGE,
     OTHER
 }

@@ -1,0 +1,10 @@
+app:
+  jwt:
+    secret: test-secret-that-is-at-least-32-characters-long-for-hmac-sha
+  cookie:
+    secure: false
+  cors:
+    allowed-origins: http://localhost:3000
+  admin-bootstrap:
+    email: ""
+    password: ""

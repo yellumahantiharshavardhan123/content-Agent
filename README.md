@@ -29,8 +29,13 @@ AI-powered content marketing system for Arjun Sports Shooting Academy: upload me
 This project ships module-by-module; see the build plan for the full roadmap. Shipped so far:
 
 - **Module 0 — Foundation & Scaffolding**: monorepo skeleton, Spring Boot bootstrap (security baseline, global exception handling, `ApiResponse`/`PageResponse` wrappers, Flyway), cross-cutting audit log and in-app notification services, `AppSetting` entity scaffold, Next.js bootstrap with dark/light theme and a dashboard shell navigable to every future module.
+- **Module 1 — Authentication & Authorization**: JWT access/refresh tokens in HttpOnly cookies (rotation + reuse detection + invalidation), BCrypt password hashing, `User`/`Role`/`UserStatus` model with an env-driven first-admin bootstrap, login/logout/refresh/me/change-password/forgot-password/reset-password endpoints, role-based `/api/users/**` admin endpoints, login rate limiting, audit logging and in-app notifications on login/failed-login/logout/password-change, and a full Next.js auth flow (login page, session-aware dashboard layout, route-guarding proxy with silent token refresh, real logout + change-password UI).
 
-Everything else (auth, media upload, AI generation, drafts, approvals, Instagram/website publishing, scheduler, analytics, activity log viewer, notification center, settings UI) ships in later modules.
+Everything else (media upload, AI generation, drafts, approvals, Instagram/website publishing, scheduler, analytics, activity log viewer, notification center, settings UI) ships in later modules.
+
+### First login (fresh database)
+
+Set `ADMIN_BOOTSTRAP_EMAIL` and `ADMIN_BOOTSTRAP_PASSWORD` in `.env` before the first `docker compose up` (or first `mvn spring-boot:run`). The backend seeds exactly one ADMIN account from these values when the `users` table is empty; it is a no-op (with a log warning) on every later boot.
 
 ## Local development
 

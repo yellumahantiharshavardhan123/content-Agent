@@ -2,6 +2,11 @@ spring:
   jpa:
     show-sql: true
 
+app:
+  cookie:
+    # Plain HTTP over localhost in dev - Secure cookies would never be sent.
+    secure: ${COOKIE_SECURE:false}
+
 logging:
   level:
     root: INFO

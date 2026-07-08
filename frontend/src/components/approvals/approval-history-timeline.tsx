@@ -1,0 +1,59 @@
+"use client";
+
+import { CheckCircle2, MessageSquare, Send, XCircle } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+import type { ApprovalHistoryEntry } from "@/types/approval";
+
+interface ApprovalHistoryTimelineProps {
+  entries: ApprovalHistoryEntry[];
+  isLoading: boolean;
+}
+
+const ACTION_ICON: Record<ApprovalHistoryEntry["action"], React.ReactNode> = {
+  SUBMIT: <Send className="size-4" />,
+  APPROVE: <CheckCircle2 className="size-4 text-green-600 dark:text-green-500" />,
+  REJECT: <XCircle className="size-4 text-destructive" />,
+  COMMENT: <MessageSquare className="size-4" />,
+};
+
+const ACTION_LABEL: Record<ApprovalHistoryEntry["action"], string> = {
+  SUBMIT: "Submitted for approval",
+  APPROVE: "Approved",
+  REJECT: "Rejected",
+  COMMENT: "Commented",
+};
+
+export function ApprovalHistoryTimeline({ entries, isLoading }: ApprovalHistoryTimelineProps) {
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-14 w-full rounded-lg" />
+        ))}
+      </div>
+    );
+  }
+
+  if (entries.length === 0) {
+    return <p className="text-sm text-muted-foreground">No history yet.</p>;
+  }
+
+  return (
+    <ol className="flex flex-col gap-4">
+      {entries.map((entry) => (
+        <li key={entry.id} className="flex gap-3">
+          <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border bg-muted">
+            {ACTION_ICON[entry.action]}
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <p className="text-sm font-medium">{ACTION_LABEL[entry.action]}</p>
+            <p className="text-xs text-muted-foreground">
+              {entry.actorEmail ?? "System"} - {new Date(entry.createdAt).toLocaleString()}
+            </p>
+            {entry.remarks && <p className="text-sm text-muted-foreground">&quot;{entry.remarks}&quot;</p>}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}

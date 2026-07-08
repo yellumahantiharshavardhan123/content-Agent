@@ -1,6 +1,6 @@
 # Implementation Report — Arjun Sports AI Content Agent
 
-**Scope of this report:** Modules 0 through 4 (Foundation & Scaffolding, Authentication & Authorization, Media Upload, AI Content Generation, Content Draft Management). No later module has been started.
+**Scope of this report:** Modules 0 through 5 (Foundation & Scaffolding, Authentication & Authorization, Media Upload, AI Content Generation, Content Draft Management, Approval Workflow). No later module has been started.
 
 ---
 
@@ -29,7 +29,7 @@ Built a complete JWT-based authentication and authorization system on top of Mod
 - Login rate limiting (5/min/IP), audit logging of login/failed-login/logout/password-change, in-app notifications on successful login and password change.
 - Environment-driven first-admin bootstrap (no hardcoded credentials anywhere).
 - Next.js: login page, session-aware dashboard layout, route-guarding `proxy.ts` with silent token refresh, real logout and change-password UI wired to a real signed-in user.
-- One real bug found during manual browser verification and fixed (see §8).
+- One real bug found during manual browser verification and fixed (see §11).
 - **Committed to git** on the `dev` branch (commit `d08c0fa`, "feat: complete Module 1 - Authentication & Authorization").
 
 ## 3. Summary of Module 2 — Media Upload
@@ -40,22 +40,25 @@ A MinIO-backed media library sitting behind the same auth/audit/notification inf
 - `Media` entity (soft-deletable) + per-`MediaType` validation rules (allowed content-types and max size: IMAGE 10MB, VIDEO 200MB, PDF 20MB, TEXT_NOTE 2MB), enforced in `MediaValidationRules` before any bytes reach storage.
 - Upload/list/delete endpoints, audit-logged, backed by Flyway migration `V3__media.sql`.
 - Next.js media library page: drag-drop upload with progress, grid view, preview, delete confirmation.
-- One real production bug found and fixed during manual verification (see §8).
+- One real production bug found and fixed during manual verification (see §11).
 - **Committed to git** on the `dev` branch, bundled with Module 3 (commit `976d2b5`, "feat: complete Module 2 and Module 3 - Media Upload & AI Content Generation").
 
 ## 4. Summary of Module 3 — AI Content Generation
 
 A provider-agnostic AI generation layer producing all 17 marketing content types from uploaded media and/or free-text context, with prompts stored in the database rather than hardcoded:
 
-- `AIProvider` interface with a single `OpenAICompatibleProvider` implementation today, selected by name via `AIProviderResolver` off `app.ai.active-provider` — adding Gemini/Claude/Azure OpenAI/Ollama later means one new class, no changes to `AIContentServiceImpl` or the controller.
+- `AIProvider` interface with an `OpenAICompatibleProvider` implementation, selected by name via `AIProviderResolver` off `app.ai.active-provider` — adding Gemini/Claude/Azure OpenAI/Ollama later means one new class, no changes to `AIContentServiceImpl` or the controller.
 - `PromptTemplate` entity: versioned and immutable — "editing" a template deactivates the current row and inserts a new one at `version + 1`, enforced at the database level by a partial unique index (`WHERE is_active = TRUE`) per content type.
 - `PromptBuilder` resolves `{{placeholder}}` tokens (`academyName`, media description, manual notes, event/achievement/competition/training/coach fields) against both the system and user prompt.
 - `GeneratedContent` (the editable content library) and an append-only `GenerationHistory` log recording every attempt, success or failure, with actor/model/latency.
 - Generate/regenerate/edit/delete endpoints, rate-limited (10/min/user), audit-logged, with in-app notifications on completion and failure.
 - Flyway migrations `V4__ai_content_generation.sql` and `V5__prompt_template_seed.sql` (seeds all 17 default templates).
 - Next.js generation UI: content-type picker, media/context form, generate/regenerate/copy/edit/preview/delete on each result card.
-- Two real bugs found and fixed — one a significant transaction-rollback data-loss bug, one a prompt-substitution defect found during Module 4's own verification pass (see §8).
-- **Committed to git** on the `dev` branch, bundled with Module 2 (commit `976d2b5`).
+- Two real bugs found and fixed — one a significant transaction-rollback data-loss bug, one a prompt-substitution defect found during Module 4's own verification pass (see §11).
+- A `MockAIProvider` (`@Profile("dev")`-gated, selected by default in the `dev` profile via `app.ai.active-provider`) was added after this module shipped, once it became clear no real OpenAI key would be available for ongoing development — see the addendum at the end of this section.
+- **Committed to git** on the `dev` branch, bundled with Module 2 (commit `976d2b5`); the `MockAIProvider` addendum was committed separately (commit `8419cbe`).
+
+**Addendum — Mock AI Provider for dev/testing:** `MockAIProvider implements AIProvider` returns realistic, content-type-appropriate sample text (captions, hashtags, blog articles, reel/short-video scripts, SEO fields, etc. — all 17 types) inferred from distinctive phrases in the resolved prompt text, since `AIGenerationRequest` deliberately carries only plain prompt strings, not a `ContentType`, to keep the interface identical to a real provider's. It weaves in whatever context (notes/achievement/event details) was actually supplied, simulates realistic latency, and supports a `SIMULATE_FAILURE` marker to deliberately exercise the failure path. The bean only exists under `@Profile("dev")` — production can never select it even via misconfiguration, since it isn't in the Spring context at all outside that profile.
 
 ## 5. Summary of Module 4 — Content Draft Management
 
@@ -68,10 +71,24 @@ A curation/review layer on top of Module 3's raw generated content, giving an ad
 - Audit logging (`CREATE`/`UPDATE`/`DELETE`/`RESTORE`/`APPROVE`) and in-app notifications (`DRAFT_SAVED`/`DRAFT_UPDATED`/`DRAFT_DELETED`/`DRAFT_RESTORED`), reusing the same `AuditLogService`/`NotificationService` interfaces with purely additive enum extensions.
 - Flyway migration `V6__content_drafts.sql`.
 - Next.js Draft Management page: card/list view toggle, status chips, search/filter, preview/edit drawers (shadcn `Sheet`, distinct from Module 3's centered dialogs), trash + restore, pagination — plus a "Save as Draft" button added to Module 3's `GeneratedContentCard` as the natural entry point into this module.
-- Two real bugs found and fixed during this module's own implementation and verification (see §8), one of which was a defect in Module 3's already-shipped code, not new Module 4 code.
-- **Committed to git** on the `dev` branch (see §11 for the exact commit once created) — **not pushed**, per instruction.
+- Two real bugs found and fixed during this module's own implementation and verification (see §11), one of which was a defect in Module 3's already-shipped code, not new Module 4 code.
+- **Committed to git** on the `dev` branch (commit `eb3a1a6`, "feat: complete Module 4 - Content Draft Management").
 
-## 6. Features Completed
+## 6. Summary of Module 5 — Approval Workflow
+
+A review cycle on top of Module 4's drafts, giving an admin reviewer a formal approve/reject decision point (with discussion) before content is considered ready to publish:
+
+- `Approval` entity with a `PENDING_APPROVAL → APPROVED/REJECTED → READY_FOR_PUBLISH` status lifecycle, created from (and denormalizing `contentTitle`/`contentType` from) a source `ContentDraft` row for search/display purposes.
+- Approving directly advances the approval to `READY_FOR_PUBLISH` (there is no separate manual "mark ready" step) and moves the underlying draft to `DraftStatus.APPROVED`; rejecting moves the approval to `REJECTED` and the draft back to `DraftStatus.DRAFT` so it can be edited and resubmitted. Both transitions are applied directly via `DraftRepository` (not `DraftService`), specifically so Module 4's own audit/notification side effects aren't duplicated on top of Module 5's.
+- `ApprovalHistory` (immutable append-only log, same pattern as `GenerationHistory`) records every submit/approve/reject/comment action with before/after status; `ApprovalComment` holds the reviewer/submitter discussion thread for an approval.
+- Business rule "only one outstanding review request per draft" is enforced twice: once at the service layer (clear `409`) and once at the database level (`idx_approvals_one_pending_per_content`, a partial unique index) as defense in depth — the same pattern Module 3 used for one-active-prompt-template-per-type.
+- Submit/approve/reject/comment/pending-list/history/detail endpoints, all class-level `@PreAuthorize("hasRole('ADMIN')")`. Submitting notifies every active admin (`UserRepository.findByRoleAndActiveTrue` — the first read-only cross-module dependency on `modules/user` since `modules/auth`); approving/rejecting/commenting notifies the original submitter (or reviewer, for a submitter's own comment) via `Approval.createdBy` — no separate "submitted by" column was needed since `BaseEntity`'s JPA-audited `createdBy` already captures it.
+- Flyway migration `V7__approval_workflow.sql`.
+- Next.js Approval Dashboard (`/approvals`): Pending/Approved/Rejected tabs, search-by-title, date-range filter, pagination. Detail page (`/approvals/[id]`): status header, View Draft/Approve/Reject actions, history timeline, comments panel. A "Submit for Approval" button was added to Module 4's `DraftCard` as the natural entry point into this module.
+- This module's own package layout deliberately differs from Modules 2–4's flatter convention, using explicit `entity/`, `repository/`, `service/`+`service/impl/`, `controller/`, `mapper/`, `validation/` subpackages under `modules/approval/` per an explicit structural request.
+- **Committed to git** on the `dev` branch (see §14 for the exact commit) — **not pushed**, per instruction.
+
+## 7. Features Completed
 
 | Feature | Status |
 |---|---|
@@ -83,15 +100,20 @@ A curation/review layer on top of Module 3's raw generated content, giving an ad
 | DB-backed, versioned, admin-editable prompt templates | ✅ Complete (Module 3) |
 | Generate/regenerate/edit/delete generated content | ✅ Complete (Module 3) |
 | Generation history log | ✅ Complete (Module 3) |
+| Mock AI provider for dev/testing without a real API key | ✅ Complete (Module 3 addendum) |
 | Save generated content as a draft | ✅ Complete (Module 4) |
 | Edit / duplicate / soft-delete / restore a draft | ✅ Complete (Module 4) |
 | Draft status lifecycle (finalize / move back to draft) | ✅ Complete (Module 4) |
 | Draft search, filter, sort, pagination | ✅ Complete (Module 4) |
+| Submit a draft for approval | ✅ Complete (Module 5) |
+| Approve / reject with remarks | ✅ Complete (Module 5) |
+| Review comments thread | ✅ Complete (Module 5) |
+| Approval history timeline, pending/approved/rejected dashboard with search + date range | ✅ Complete (Module 5) |
 | Frontend forgot/reset-password pages | ❌ Not built (backend endpoints exist and are tested; no UI) |
 | Application Settings UI | ❌ Not started |
-| Approval workflow, publishing, scheduling, analytics | ❌ Not started |
+| Publishing, scheduling, analytics | ❌ Not started |
 
-## 7. Files / Modules Created
+## 8. Files / Modules Created
 
 Full, exact file-by-file diffs for every module are in git history (`git show <commit>`) and are not reproduced line-by-line here to avoid this report drifting out of sync with the code. Package-level summary:
 
@@ -110,42 +132,66 @@ backend/src/main/java/.../modules/ai/               ContentType, GenerationStatu
 backend/src/main/java/.../modules/ai/provider/      AIProvider, AIGenerationRequest/Result, AIProviderException,
                                                      AIProviderProperties, OpenAICompatibleProvider,
                                                      AIProviderResolver                                    (Module 3)
+                                                     MockAIProvider                          (Module 3 addendum)
 backend/src/main/java/.../modules/draft/            DraftStatus, ContentDraft, DraftRepository, DraftSpecifications,
                                                      DraftValidator, DraftMapper, DraftService(+Impl),
                                                      DraftController, dto/                                 (Module 4)
+backend/src/main/java/.../modules/approval/         entity/ (Approval, ApprovalHistory, ApprovalComment,
+                                                       ApprovalStatus, ApprovalAction)
+                                                     repository/ (ApprovalRepository +Specifications,
+                                                       ApprovalHistoryRepository, ApprovalCommentRepository)
+                                                     service/ + service/impl/ (ApprovalService/Impl)
+                                                     controller/ (ApprovalController)
+                                                     mapper/ (ApprovalMapper), validation/ (ApprovalValidator)
+                                                     dto/                                                  (Module 5)
 backend/src/main/resources/db/migration/            V3__media.sql, V4__ai_content_generation.sql,
-                                                     V5__prompt_template_seed.sql, V6__content_drafts.sql
+                                                     V5__prompt_template_seed.sql, V6__content_drafts.sql,
+                                                     V7__approval_workflow.sql
 backend/src/test/java/.../modules/media/            MediaServiceImplTest
 backend/src/test/java/.../modules/ai/               PromptBuilderTest, PromptValidatorTest, AIResponseParserTest,
                                                      AIContentServiceImplTest, AIControllerIntegrationTest
+backend/src/test/java/.../modules/ai/provider/      MockAIProviderTest
 backend/src/test/java/.../modules/draft/            DraftServiceImplTest, DraftControllerIntegrationTest,
                                                      DraftRepositoryTest
+backend/src/test/java/.../modules/approval/         ApprovalServiceImplTest, ApprovalControllerIntegrationTest
 frontend/src/components/media/                      upload-dropzone, media-card, media-grid
 frontend/src/components/ai/                          generation-form, generated-content-card(+list)
 frontend/src/components/drafts/                      draft-create-form, draft-filters, draft-card, draft-list,
                                                      draft-preview-sheet, draft-edit-sheet
+frontend/src/components/approvals/                   approval-filters, approval-queue(-card), approve/reject-dialog,
+                                                     view-draft-dialog, approval-history-timeline,
+                                                     approval-comments-panel
 frontend/src/app/(dashboard)/media/page.tsx          (Module 2), .../content/page.tsx (Module 3),
-                                                     .../drafts/page.tsx (Module 4) — all rewritten from placeholders
-frontend/src/lib/api/{media,ai,drafts}.ts            typed API clients per module
-frontend/src/types/{media,ai,drafts}.ts              shared frontend types per module
+                                                     .../drafts/page.tsx (Module 4),
+                                                     .../approvals/page.tsx + approvals/[id]/page.tsx (Module 5)
+                                                     — all rewritten from placeholders
+frontend/src/lib/api/{media,ai,drafts,approval}.ts   typed API clients per module
+frontend/src/types/{media,ai,drafts,approval}.ts     shared frontend types per module
 ```
 
 Additive-only changes to already-shipped modules (every one of these is a new enum constant, new optional config key, or new independent method — no existing behavior was altered):
 
 ```
 common/audit/ActivityAction.java            + RESTORE                                     (Module 4)
+                                             + SUBMIT, COMMENT                              (Module 5)
 common/notification/NotificationType.java   + GENERATION_COMPLETED, GENERATION_FAILED      (Module 3)
                                              + DRAFT_SAVED, DRAFT_UPDATED, DRAFT_DELETED,
                                                DRAFT_RESTORED                               (Module 4)
+                                             + APPROVAL_COMMENT_ADDED (APPROVAL_REQUIRED/
+                                               APPROVED/REJECTED existed since Module 0/1,
+                                               unused until now)                            (Module 5)
 common/exception/RateLimitExceededException.java   new (Module 3)
 common/exception/GlobalExceptionHandler.java + RateLimitExceededException, AIProviderException handlers (Module 3)
+modules/user/UserRepository.java             + findByRoleAndActiveTrue                      (Module 5)
 application.yml / docker-compose.yml / .env.example  + app.storage.*, app.ai.* config blocks (Modules 2–3)
+application-dev.yml                          + app.ai.active-provider defaulting to "mock"   (Module 3 addendum)
 frontend/src/lib/api/client.ts               + PageResponse<T>, apiFetchFormData()          (Module 2)
-frontend/src/lib/nav-config.ts               Media/AI/Drafts flipped "upcoming" → "available" as each shipped
+frontend/src/lib/nav-config.ts               Media/AI/Drafts/Approvals flipped "upcoming" → "available" as each shipped
 frontend/src/components/ai/generated-content-card.tsx  + "Save as Draft" button              (Module 4, integration point)
+frontend/src/components/drafts/draft-card.tsx          + "Submit for Approval" button        (Module 5, integration point)
 ```
 
-## 8. Database Changes
+## 9. Database Changes
 
 | Migration | Module | Adds |
 |---|---|---|
@@ -153,12 +199,13 @@ frontend/src/components/ai/generated-content-card.tsx  + "Save as Draft" button 
 | `V4__ai_content_generation.sql` | 3 | `prompt_templates`, `generated_content`, `generation_history` |
 | `V5__prompt_template_seed.sql` | 3 | 17 seed rows in `prompt_templates` (one per content type) |
 | `V6__content_drafts.sql` | 4 | `content_drafts` |
+| `V7__approval_workflow.sql` | 5 | `approvals`, `approval_history`, `approval_comments` |
 
-Full column-by-column detail, indexes, and an ASCII ER diagram are in `DATABASE_DESIGN.md`. All new foreign keys use `ON DELETE SET NULL`, matching the pattern set by `V2`'s `users` FKs conceptually but chosen deliberately here so deleting upstream media/content never cascades or fails — see `ARCHITECTURE.md` §15.
+Full column-by-column detail, indexes, and an ASCII ER diagram are in `DATABASE_DESIGN.md`. All new foreign keys use `ON DELETE SET NULL` (except `approval_comments`, deliberately `CASCADE` — see `DATABASE_DESIGN.md` §2), so deleting upstream media/content/drafts never cascades or fails unexpectedly — see `ARCHITECTURE.md` §15.
 
-## 9. API Endpoints Delivered
+## 10. API Endpoints Delivered
 
-In addition to the Module 0/1 endpoints listed in the previous version of this report (health, auth, users — unchanged, see `API_DOCUMENTATION.md`):
+In addition to the Module 0/1 endpoints listed in earlier versions of this report (health, auth, users — unchanged, see `API_DOCUMENTATION.md`):
 
 | Method | Path | Auth | Module |
 |---|---|---|---|
@@ -179,35 +226,44 @@ In addition to the Module 0/1 endpoints listed in the previous version of this r
 | POST | `/api/drafts/{id}/duplicate` | ADMIN | 4 |
 | POST | `/api/drafts/{id}/restore` | ADMIN | 4 |
 | POST | `/api/drafts/{id}/finalize` | ADMIN | 4 |
+| POST | `/api/approval/submit` | ADMIN | 5 |
+| POST | `/api/approval/approve/{id}` | ADMIN | 5 |
+| POST | `/api/approval/reject/{id}` | ADMIN | 5 |
+| POST | `/api/approval/comment/{id}` | ADMIN | 5 |
+| GET | `/api/approval/pending` | ADMIN | 5 |
+| GET | `/api/approval/history/{contentId}` | ADMIN | 5 |
+| GET | `/api/approval/{id}` | ADMIN | 5 |
 
 Full request/response contracts, validation rules, and error codes are documented in `API_DOCUMENTATION.md`.
 
-## 10. Testing Performed
+## 11. Testing Performed
 
 ### Automated (backend, JUnit 5 + Mockito + Testcontainers)
 
-**93 tests, all passing**, across the full suite (`cd backend && mvn test`):
+**124 tests, all passing**, across the full suite (`cd backend && mvn test`):
 
 | Test class | Count | Module |
 |---|---|---|
 | `JwtTokenProviderTest`, `RefreshTokenServiceImplTest`, `AuthServiceImplTest`, `AuthControllerIntegrationTest`, `AuditLogServiceImplTest`, `InAppNotificationServiceImplTest` | 4, 6, 4, 7, 2, 6 | 0/1 |
 | `MediaServiceImplTest` | 6 | 2 |
-| `PromptBuilderTest`, `PromptValidatorTest`, `AIResponseParserTest`, `AIContentServiceImplTest`, `AIControllerIntegrationTest` | 2, 5, 5, 6, 6 | 3 |
+| `PromptBuilderTest`, `PromptValidatorTest`, `AIResponseParserTest`, `AIContentServiceImplTest`, `AIControllerIntegrationTest`, `MockAIProviderTest` | 2, 5, 5, 6, 6, 7 | 3 |
 | `DraftServiceImplTest`, `DraftControllerIntegrationTest`, `DraftRepositoryTest` | 16, 13, 5 | 4 |
+| `ApprovalServiceImplTest`, `ApprovalControllerIntegrationTest` | 12, 12 | 5 |
 
-Notable regression tests: `AIControllerIntegrationTest.generate_providerFailure_returns503AndPersistsFailedHistoryDespiteRollback` (guards the transaction-rollback bug in §8) and `DraftControllerIntegrationTest.finalize_thenFinalizeAnotherDraftOfSameSource_returnsConflict` (guards the duplicate-final-draft business rule).
+Notable regression tests: `AIControllerIntegrationTest.generate_providerFailure_returns503AndPersistsFailedHistoryDespiteRollback` (guards the transaction-rollback bug in §12), `DraftControllerIntegrationTest.finalize_thenFinalizeAnotherDraftOfSameSource_returnsConflict` (guards the duplicate-final-draft business rule), and `ApprovalControllerIntegrationTest.approve_alreadyApproved_returnsConflict`/`submit_duplicatePending_returnsConflict` (guard the one-outstanding-review-per-draft rule at the API level, backed by both the service-layer check and the database's partial unique index).
 
 ### Manual / interactive (frontend + full stack)
 
 No automated frontend test runner is configured (no Jest/RTL/Playwright dependency committed to `package.json`); each module was instead verified with a one-off Playwright/Chromium session (installed ad hoc, not part of the committed project) driving the real Docker stack:
 
 - **Module 2**: upload (image/video/PDF/text-note) → grid renders → preview → delete, against real MinIO.
-- **Module 3**: generate → regenerate → copy → edit → toggle draft/final → delete, against both a local mock OpenAI-compatible endpoint and the real OpenAI API (auth-failure path, to prove error handling against a genuine external response).
-- **Module 4**: save draft → preview drawer → edit drawer → finalize → duplicate → search filters correctly → delete → show trash → restore, plus a second pass specifically exercising the duplicate-final-draft `409` and confirming it now renders as an inline error rather than an uncaught exception (see §8).
+- **Module 3**: generate → regenerate → copy → edit → toggle draft/final → delete, against both a local mock OpenAI-compatible endpoint and the real OpenAI API (auth-failure path, to prove error handling against a genuine external response); the `MockAIProvider` addendum was separately verified end-to-end against the real running stack (multiple content types, the `SIMULATE_FAILURE` trigger, and a full generate → save-as-draft round trip) with zero external calls.
+- **Module 4**: save draft → preview drawer → edit drawer → finalize → duplicate → search filters correctly → delete → show trash → restore, plus a second pass specifically exercising the duplicate-final-draft `409` and confirming it now renders as an inline error rather than an uncaught exception (see §12).
+- **Module 5**: submit → pending queue shows it → detail page loads → View Draft shows live draft content → add comment → history timeline reflects it → approve with remarks → status becomes Ready for Publish → item disappears from the Pending tab and appears under Approved. A separate curl pass exercised reject (draft correctly returns to `DRAFT`), the duplicate-submission `409`, the already-approved `409`, and confirmed audit log + notification rows were created for every action.
 
-All three sessions completed with zero uncaught client-side exceptions on their final run. `npm run lint` and `npm run build` are clean after every module.
+All sessions completed with zero uncaught client-side exceptions on their final run. `npm run lint` and `npm run build` are clean after every module.
 
-## 11. Bugs Found and Fixed
+## 12. Bugs Found and Fixed
 
 ### Profile dropdown crash ("This page couldn't load") — Module 1
 
@@ -238,45 +294,50 @@ All three sessions completed with zero uncaught client-side exceptions on their 
 - **Symptom:** found via Playwright — attempting to finalize a draft whose source already had another `APPROVED` draft correctly returned `409` from the backend, but the frontend's `handleFinalize`/`handleDuplicate`/`handleRestore`/`handleMoveToDraft` had no `try`/`catch`, so the rejection surfaced as an uncaught promise rejection instead of a visible message.
 - **Fix:** `DraftCard`'s shared `withBusy()` wrapper now catches and displays the error inline (matching the pattern already used by the create/edit forms); added a dedicated Playwright check asserting the conflict renders as an inline `Alert`, not a crash.
 
-No other bugs were found during Modules 2–4's implementation or verification.
+No bugs were found during Module 5's implementation or verification — its curl and Playwright passes both succeeded on the first attempt.
 
-## 12. Security Features Implemented
+## 13. Security Features Implemented
 
-Carried over from Module 1 (BCrypt hashing, JWT + refresh token rotation/reuse-detection, HttpOnly/Secure/SameSite cookies, CORS with explicit origins, role-based `@PreAuthorize`, login rate limiting, full Bean Validation, audit trail, no hardcoded credentials) — see the previous version of this report or `ARCHITECTURE.md` §9 for detail. Added in Modules 2–4:
+Carried over from Module 1 (BCrypt hashing, JWT + refresh token rotation/reuse-detection, HttpOnly/Secure/SameSite cookies, CORS with explicit origins, role-based `@PreAuthorize`, login rate limiting, full Bean Validation, audit trail, no hardcoded credentials) — see earlier versions of this report or `ARCHITECTURE.md` §9 for detail. Added in Modules 2–5:
 
 - Per-`MediaType` upload validation (content-type allow-list + max size) enforced before any bytes are persisted to storage.
 - AI generation rate limiting (Bucket4j, 10/min/user), independent of the login limiter.
-- `/api/ai/**`, `/api/prompts/**`, and `/api/drafts/**` are all class-level `@PreAuthorize("hasRole('ADMIN')")` — no endpoint under these paths is reachable by an authenticated-but-non-admin user.
+- `/api/ai/**`, `/api/prompts/**`, `/api/drafts/**`, and `/api/approval/**` are all class-level `@PreAuthorize("hasRole('ADMIN')")` — no endpoint under these paths is reachable by an authenticated-but-non-admin user (satisfying Module 5's explicit "Only ADMIN can approve" rule, applied consistently to the whole controller rather than just the approve action).
 - AI provider errors are classified (`AIProviderException.Reason`) and mapped to distinct HTTP statuses rather than leaking raw provider error bodies to the client.
+- `MockAIProvider` is unreachable outside the `dev` Spring profile at the bean-registration level (`@Profile("dev")`), not just by configuration default — a production misconfiguration cannot select a provider that was never instantiated.
 
-## 13. Verification Results
+## 14. Verification Results
 
 | Check | Result |
 |---|---|
-| `mvn test` (backend, full suite) | ✅ 93/93 passing |
+| `mvn test` (backend, full suite) | ✅ 124/124 passing |
 | `npm run lint` (frontend) | ✅ Clean |
-| `npm run build` (frontend) | ✅ Clean, all routes compiled |
+| `npm run build` (frontend) | ✅ Clean, all routes compiled (incl. `/approvals`, `/approvals/[id]`) |
 | `docker compose up` (full stack) | ✅ All 4 containers healthy/running |
-| Flyway migrations `V1`–`V6` | ✅ Applied cleanly against a real Postgres container |
-| Swagger UI / `/api-docs` (dev profile) | ✅ Loads, lists all 20 documented endpoints across Modules 1–4 |
+| Flyway migrations `V1`–`V7` | ✅ Applied cleanly against a real Postgres container |
+| Swagger UI / `/api-docs` (dev profile) | ✅ Loads, lists all 32 documented endpoints across Modules 1–5 |
 | Media upload → preview → delete (real MinIO) | ✅ Verified via curl and browser |
 | AI generation success/failure paths | ✅ Verified against a mock endpoint and the real OpenAI API |
 | Draft save/edit/duplicate/finalize/delete/restore/search/filter | ✅ Verified via curl and browser (Playwright, zero uncaught errors on final run) |
 | Duplicate-final-draft business rule | ✅ `409` verified via curl and browser, with graceful inline error display |
+| Approval submit/approve/reject/comment/history/pending | ✅ Verified via curl and browser (Playwright, zero uncaught errors on first run) |
+| Duplicate-pending-approval and already-approved business rules | ✅ `409` verified via curl at both the service layer and the database's partial unique index |
+| Draft ↔ Approval status sync (submit → READY_FOR_REVIEW, approve → APPROVED, reject → DRAFT) | ✅ Verified via curl and direct DB inspection |
+| Audit log + notifications on every approval action | ✅ Verified via direct DB inspection (`activity_log`, `notifications`) |
 
-## 14. Current Project Status
+## 15. Current Project Status
 
 - **Module 0**: complete, committed (`dev`, commit `6bbebc8`).
 - **Module 1**: complete, committed (`dev`, commit `d08c0fa`).
 - **Modules 2 & 3**: complete, committed together (`dev`, commit `976d2b5`).
-- **Module 4**: complete and verified as described above; committed to `dev` (see the commit created alongside this report) but **not pushed**, per instruction.
+- **Module 4**: complete, committed (`dev`, commit `eb3a1a6`). Its Mock AI Provider addendum is committed separately (`dev`, commit `8419cbe`).
+- **Module 5**: complete and verified as described above; committed to `dev` (see the commit created alongside this report) — **not pushed**, per instruction.
 - The full stack runs locally via `docker compose --env-file .env -f infra/docker-compose.yml up -d` on ports 3000 (frontend), 8080 (backend), 5433 (Postgres, host-mapped), 9000/9001 (MinIO).
 
-## 15. Remaining Roadmap
+## 16. Remaining Roadmap
 
 Per the agreed build plan, not started yet:
 
-6. Approval Workflow
 7. Instagram Publisher
 8. Website Publisher
 9. Scheduler
@@ -286,4 +347,4 @@ Per the agreed build plan, not started yet:
 13. Security Hardening & Finalization
 14. DevOps & Docs Finalization
 
-Also still outstanding: Application Settings (full CRUD + admin UI over the `AppSetting` scaffold from Module 0), frontend forgot-password/reset-password pages (backend ready, no UI), and real email delivery for password reset.
+Also still outstanding: Application Settings (full CRUD + admin UI over the `AppSetting` scaffold from Module 0), frontend forgot-password/reset-password pages (backend ready, no UI), and real email delivery for password reset. A real OpenAI (or other provider) API key is still not configured — `MockAIProvider` covers all dev/demo needs, but no content has been generated by an actual AI model.

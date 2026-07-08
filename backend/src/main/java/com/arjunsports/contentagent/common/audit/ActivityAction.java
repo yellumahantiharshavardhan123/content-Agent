@@ -11,6 +11,8 @@ public enum ActivityAction {
     PUBLISH,
     SCHEDULE,
     RESTORE,
+    SUBMIT,
+    COMMENT,
     LOGIN,
     LOGIN_FAILED,
     LOGOUT,

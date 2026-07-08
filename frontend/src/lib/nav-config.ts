@@ -28,7 +28,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Media Upload", href: "/media", icon: UploadCloud, moduleNumber: 2, status: "available" },
   { label: "AI Content Generator", href: "/content", icon: Sparkles, moduleNumber: 3, status: "available" },
   { label: "Drafts", href: "/drafts", icon: FileText, moduleNumber: 4, status: "available" },
-  { label: "Approvals", href: "/approvals", icon: CheckSquare, moduleNumber: 6, status: "upcoming" },
+  { label: "Approvals", href: "/approvals", icon: CheckSquare, moduleNumber: 5, status: "available" },
   { label: "Instagram Publisher", href: "/instagram", icon: Camera, moduleNumber: 7, status: "upcoming" },
   { label: "Website Publisher", href: "/website", icon: Globe, moduleNumber: 8, status: "upcoming" },
   { label: "Scheduler", href: "/scheduler", icon: CalendarClock, moduleNumber: 9, status: "upcoming" },

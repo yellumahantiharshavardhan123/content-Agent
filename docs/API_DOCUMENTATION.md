@@ -1,7 +1,7 @@
 # API Documentation — Arjun Sports AI Content Agent
 
 **Base URL (local):** `http://localhost:8080/api`
-**Scope:** only endpoints that exist in the codebase today (Module 0 health check, Module 1 auth/user, Module 2 media, Module 3 AI generation/prompts, Module 4 content drafts). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
+**Scope:** only endpoints that exist in the codebase today (Module 0 health check, Module 1 auth/user, Module 2 media, Module 3 AI generation/prompts, Module 4 content drafts, Module 5 approval workflow). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
 
 ## Response Envelope
 
@@ -425,3 +425,37 @@ Clears the soft-delete flag. **Errors:** `400` if the draft is not deleted.
 ### `POST /api/drafts/{id}/finalize`
 
 Transitions the draft to `APPROVED`. **Errors:** `409` if already `APPROVED`/`PUBLISHED`/`ARCHIVED`, or if another non-deleted draft for the same `generatedContentId` is already `APPROVED`.
+
+---
+
+## Approval Workflow APIs (ADMIN only)
+
+A review cycle on top of `content_drafts` (Module 4). Approving or rejecting also updates the underlying draft's own status (`DraftStatus.APPROVED` or back to `DraftStatus.DRAFT`) — see `ARCHITECTURE.md` for how `Approval` relates to `ContentDraft`.
+
+### `POST /api/approval/submit`
+
+**Request:** `{ "contentId": "<uuid>" }` (a `ContentDraft` id). Creates an `Approval` row at `PENDING_APPROVAL` and moves the draft to `READY_FOR_REVIEW`; notifies every active ADMIN. **Errors:** `404` unknown `contentId`; `400` if the draft is deleted; `409` if the draft already has a `PENDING_APPROVAL` or `READY_FOR_PUBLISH` approval outstanding.
+
+### `POST /api/approval/approve/{id}`
+
+**Request:** `{ "remarks": "optional note" }` (body itself is optional). Moves the approval to `READY_FOR_PUBLISH` and the draft to `APPROVED`; notifies the original submitter. **Errors:** `404` unknown id; `409` if the approval is not currently `PENDING_APPROVAL`; `400` if the underlying draft has since been deleted.
+
+### `POST /api/approval/reject/{id}`
+
+**Request:** `{ "remarks": "required reason" }`. Moves the approval to `REJECTED` and the draft back to `DRAFT` (so it can be edited and resubmitted); notifies the original submitter. **Errors:** `404` unknown id; `400` blank remarks; `409` if the approval is not currently `PENDING_APPROVAL`.
+
+### `POST /api/approval/comment/{id}`
+
+**Request:** `{ "comment": "..." }`. Adds a remark to the approval's discussion thread without changing its status; notifies whichever of the submitter/reviewer didn't post the comment. **Errors:** `404` unknown id; `400` blank comment.
+
+### `GET /api/approval/pending`
+
+Paginated, searchable, filterable list. Query params: `page`, `size`, `sort`, `status` (defaults to `PENDING_APPROVAL` if omitted — the same endpoint serves the Approved/Rejected dashboard tabs by passing `status=READY_FOR_PUBLISH`/`REJECTED`), `search` (matches the content title, case-insensitive), `dateFrom`/`dateTo` (ISO-8601 instants, inclusive). **Errors:** `400` invalid `status` value or malformed date.
+
+### `GET /api/approval/history/{contentId}`
+
+Paginated, newest-first `ApprovalHistory` timeline for one draft — every submit/approve/reject/comment ever recorded against it, across all of its approval cycles if it was rejected and resubmitted more than once.
+
+### `GET /api/approval/{id}`
+
+Single approval, including its full comment thread. Works regardless of the approval's status.

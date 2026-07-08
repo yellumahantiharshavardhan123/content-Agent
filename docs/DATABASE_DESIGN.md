@@ -2,7 +2,7 @@
 
 **Engine:** PostgreSQL 16. **Schema ownership:** Flyway migrations only (`spring.jpa.hibernate.ddl-auto: validate` — Hibernate never generates or alters DDL, it only verifies entity mappings match what Flyway created). **Primary keys:** every table uses a `UUID` generated application-side by Hibernate (`@UuidGenerator`), so no table relies on a database-side default or the `pgcrypto`/`uuid-ossp` extensions.
 
-This document covers exactly the eleven tables that exist after migrations `V1` through `V6`. No table described here is speculative.
+This document covers exactly the fourteen tables that exist after migrations `V1` through `V7`. No table described here is speculative.
 
 ---
 
@@ -149,7 +149,45 @@ This document covers exactly the eleven tables that exist after migrations `V1` 
 │    updated_at   TIMESTAMPTZ│
 │    created_by       UUID   │
 │    updated_by       UUID   │
-└───────────────────────────┘
+└─────────────┬─────────────┘
+              │ 0..N (ON DELETE SET NULL, plain UUID column - no @ManyToOne)
+              ▼
+┌───────────────────────────┐
+│         approvals            │
+├───────────────────────────┤
+│ PK id               UUID   │
+│ FK content_id        UUID   │──── ON DELETE SET NULL → content_drafts(id)
+│    content_title    VARCHAR│  (denormalized snapshot for search/display,
+│    content_type     VARCHAR│   same reasoning as content_drafts above)
+│    reviewer_id       UUID   │
+│    status            VARCHAR│
+│    remarks               TEXT│
+│    approved_at   TIMESTAMPTZ│
+│    rejected_at   TIMESTAMPTZ│
+│    created_at   TIMESTAMPTZ│
+│    updated_at   TIMESTAMPTZ│
+│    created_by       UUID   │  (the submitter, via JPA auditing - no
+│    updated_by       UUID   │   separate submitted_by column needed)
+└──────┬────────────────┬───┘
+   0..N│(ON DELETE SET NULL)  │0..N (ON DELETE CASCADE)
+       ▼                      ▼
+┌───────────────────┐  ┌───────────────────┐
+│  approval_history    │  │  approval_comments   │
+├───────────────────┤  ├───────────────────┤
+│ PK id         UUID   │  │ PK id         UUID   │
+│    approval_id UUID  │  │    approval_id UUID  │
+│    content_id  UUID  │  │    content_id  UUID  │
+│    action      VARCHAR│  │    author_id   UUID  │
+│    previous_status   │  │    author_email VARCHAR│
+│         VARCHAR      │  │    comment         TEXT│
+│    new_status VARCHAR│  │    created_at TIMESTAMPTZ│
+│    actor_id    UUID  │  └───────────────────┘
+│    actor_email VARCHAR│  (comments are owned by their approval -
+│    remarks        TEXT│   CASCADE, unlike history which survives
+│    created_at TIMESTAMPTZ│  independently)
+└───────────────────┘
+(immutable append-only log, like generation_history -
+ no updated_at/updated_by)
 ```
 
 ## 2. Tables
@@ -325,6 +363,54 @@ No `updated_at`/`updated_by`: like `activity_log`, this is an immutable append-o
 
 Business rule enforced at the service layer (not a DB constraint, for a clearer error message than a raw constraint violation): only one non-deleted draft per `generated_content_id` may be `APPROVED` at a time (`DraftRepository.existsByGeneratedContentIdAndStatusAndDeletedFalseAndIdNot`).
 
+### `approvals` (Module 5)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `content_id` | UUID | nullable, FK → `content_drafts(id)` **ON DELETE SET NULL** |
+| `content_title` | VARCHAR(200) | nullable (denormalized from the draft at submission time, for search/display) |
+| `content_type` | VARCHAR(40) | nullable (denormalized from the draft at submission time) |
+| `reviewer_id` | UUID | nullable (set only once approved or rejected — null while `PENDING_APPROVAL`) |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT `'PENDING_APPROVAL'` — enum `ApprovalStatus`: `DRAFT`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `READY_FOR_PUBLISH` |
+| `remarks` | TEXT | nullable (the latest reviewer note — set on approve/reject) |
+| `approved_at` | TIMESTAMPTZ | nullable |
+| `rejected_at` | TIMESTAMPTZ | nullable |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns (`created_by` doubles as "who submitted this" — no separate column needed) |
+
+Business rule enforced at the database level: `idx_approvals_one_pending_per_content` is a **partial unique index** — `UNIQUE (content_id) WHERE status = 'PENDING_APPROVAL'` — so at most one active review request can exist per draft at a time, the same defense-in-depth pattern as `prompt_templates`' one-active-version-per-type index. A draft rejected and resubmitted later accumulates a new `approvals` row rather than reusing the old one, so its full review history (across every submission attempt) is preserved.
+
+### `approval_history` (Module 5)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `approval_id` | UUID | nullable, FK → `approvals(id)` **ON DELETE SET NULL** |
+| `content_id` | UUID | nullable (denormalized, no FK) |
+| `action` | VARCHAR(20) | NOT NULL — enum `ApprovalAction`: `SUBMIT`, `APPROVE`, `REJECT`, `COMMENT` |
+| `previous_status` | VARCHAR(20) | nullable (null for the initial `SUBMIT` entry) |
+| `new_status` | VARCHAR(20) | NOT NULL |
+| `actor_id` | UUID | nullable (denormalized, no FK) |
+| `actor_email` | VARCHAR(255) | nullable |
+| `remarks` | TEXT | nullable (the comment text, for `COMMENT` entries) |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+
+No `updated_at`/`updated_by`: like `generation_history`, this is an immutable append-only log — every submit/approve/reject/comment action gets its own row, never updated in place.
+
+### `approval_comments` (Module 5)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `approval_id` | UUID | NOT NULL, FK → `approvals(id)` **ON DELETE CASCADE** |
+| `content_id` | UUID | nullable (denormalized, no FK) |
+| `author_id` | UUID | nullable |
+| `author_email` | VARCHAR(255) | nullable |
+| `comment` | TEXT | NOT NULL |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+
+Unlike every other Module 2–5 foreign key (`ON DELETE SET NULL`), this one is **`ON DELETE CASCADE`**: a comment has no independent meaning once its parent approval is gone, whereas `approval_history` is a cross-cutting audit record expected to outlive whatever it references (see §1 for the same reasoning applied to `activity_log`/`notifications`).
+
 ## 3. Relationships
 
 | Relationship | Cardinality | Enforcement |
@@ -338,14 +424,19 @@ Business rule enforced at the service layer (not a DB constraint, for a clearer 
 | `prompt_templates` → `generated_content` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 | `generated_content` → `generation_history` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 | `generated_content` → `content_drafts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `content_drafts` → `approvals` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `approvals` → `approval_history` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `approvals` → `approval_comments` | 1 → N | Database FK, `ON DELETE CASCADE` |
 
-`app_settings` has no relationships to any other table. Every FK introduced in Modules 2–4 uses `ON DELETE SET NULL` rather than `CASCADE` or a hard `@ManyToOne` — deleting a `media`/`generated_content`/`prompt_templates` row never cascades or fails; dependent rows just lose the back-reference and keep whatever they've denormalized for their own display (see `ARCHITECTURE.md` §15).
+`app_settings` has no relationships to any other table. Every FK introduced in Modules 2–5 uses `ON DELETE SET NULL` rather than `CASCADE` or a hard `@ManyToOne` — deleting a `media`/`generated_content`/`prompt_templates`/`content_drafts` row never cascades or fails; dependent rows just lose the back-reference and keep whatever they've denormalized for their own display (see `ARCHITECTURE.md` §15) — **except** `approval_comments`, which is intentionally `CASCADE` since a comment has no meaning independent of its parent approval.
 
 ## 4. Constraints
 
 - `users.email`, `refresh_tokens.token_hash`, `password_reset_tokens.token_hash`, `app_settings.setting_key`, and `media.storage_key` all carry a `UNIQUE` constraint.
 - `refresh_tokens.user_id` and `password_reset_tokens.user_id` are `NOT NULL` foreign keys with `ON DELETE CASCADE` — deleting a user immediately invalidates all of their tokens.
 - `prompt_templates` has a **partial unique index** — `UNIQUE (content_type) WHERE is_active = TRUE` — enforcing exactly one active template per content type at the database level (not just the application layer).
+- `approvals` has a **partial unique index** — `UNIQUE (content_id) WHERE status = 'PENDING_APPROVAL'` — enforcing at most one outstanding review request per draft at the database level, the same defense-in-depth pattern as `prompt_templates`.
+- `approval_comments.approval_id` is a `NOT NULL` foreign key with `ON DELETE CASCADE` — deleting an approval removes its comment thread.
 - All boolean flags (`is_active`, `revoked`, `used`, `is_read`, `is_secret`, `is_deleted`, `is_draft`, `is_edited`) are `NOT NULL` with an explicit `DEFAULT`.
 - All timestamp columns use `TIMESTAMPTZ` (timezone-aware), and Hibernate is configured with `hibernate.jdbc.time_zone: UTC` so every stored instant is unambiguous.
 
@@ -378,8 +469,16 @@ Business rule enforced at the service layer (not a DB constraint, for a clearer 
 | `idx_content_drafts_content_type` | `content_drafts` | `content_type` | Content-type filter on `GET /api/drafts` |
 | `idx_content_drafts_created_at` | `content_drafts` | `created_at DESC` | Recent-first listing |
 | `idx_content_drafts_deleted` | `content_drafts` | `is_deleted` | Default "exclude trash" filter |
+| `idx_approvals_content` | `approvals` | `content_id` | Duplicate-pending check, history/detail lookups |
+| `idx_approvals_status` | `approvals` | `status` | Status filter on `GET /api/approval/pending` |
+| `idx_approvals_created_at` | `approvals` | `created_at DESC` | Recent-first listing, date-range filter |
+| `idx_approvals_one_pending_per_content` | `approvals` | `content_id` (unique, partial `WHERE status = 'PENDING_APPROVAL'`) | Enforces at most one active review request per draft |
+| `idx_approval_history_content` | `approval_history` | `content_id` | `GET /api/approval/history/{contentId}` |
+| `idx_approval_history_approval` | `approval_history` | `approval_id` | History for one specific review cycle |
+| `idx_approval_history_created_at` | `approval_history` | `created_at DESC` | Recent-first listing |
+| `idx_approval_comments_approval` | `approval_comments` | `approval_id, created_at` | Comment thread for one approval, oldest-first |
 
-Every index above backs an actual repository query method or `Specification` predicate that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`, `DraftSpecifications`) — none are speculative.
+Every index above backs an actual repository query method or `Specification` predicate that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`, `DraftSpecifications`, `ApprovalSpecifications`) — none are speculative.
 
 ## 6. Flyway Migrations
 
@@ -391,15 +490,15 @@ Every index above backs an actual repository query method or `Specification` pre
 | `V4` | `V4__ai_content_generation.sql` | Module 3 | `prompt_templates`, `generated_content`, `generation_history` + their indexes and foreign keys |
 | `V5` | `V5__prompt_template_seed.sql` | Module 3 | Seeds one active `prompt_templates` row per content type (17 rows) |
 | `V6` | `V6__content_drafts.sql` | Module 4 | `content_drafts` + its indexes and foreign keys |
+| `V7` | `V7__approval_workflow.sql` | Module 5 | `approvals`, `approval_history`, `approval_comments` + their indexes and foreign keys |
 
-All six have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed integration tests for each module, each of which boots a disposable Postgres container and runs every migration before its tests execute).
+All seven have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed integration tests for each module, each of which boots a disposable Postgres container and runs every migration before its tests execute).
 
 ## 7. Future Database Roadmap
 
 Not yet designed or migrated — listed here only to show what the current schema deliberately leaves room for, not as a commitment to a specific column layout:
 
-- **Approval** state/audit table(s) for the approval workflow (may reuse `activity_log` rather than a new table, or extend `content_drafts.status` with an approval-specific sub-table for reviewer comments).
-- **Publish record** table(s) for Instagram/website publishing history, most likely referencing `content_drafts(id)` the same `ON DELETE SET NULL` way Module 4 references `generated_content`.
+- **Publish record** table(s) for Instagram/website publishing history, most likely referencing `approvals(id)` or `content_drafts(id)` the same `ON DELETE SET NULL` way Module 5 references `content_drafts`.
 - **Schedule** table(s) for the scheduler module.
 - Full CRUD usage of the existing `app_settings` table by the Application Settings module.
-- Possible introduction of additional `Role` enum values (e.g. `EDITOR`) — the `users.role` column already supports this without a migration, since it is a plain `VARCHAR` validated at the application layer, not a database `CHECK`/`ENUM` type.
+- Possible introduction of additional `Role` enum values (e.g. `EDITOR`, or a distinct reviewer/approver role) — the `users.role` column already supports this without a migration, since it is a plain `VARCHAR` validated at the application layer, not a database `CHECK`/`ENUM` type. Module 5's "Only ADMIN can approve" rule is enforced purely at `@PreAuthorize`, so introducing a narrower reviewer role later is a controller-annotation change, not a schema change.

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import { CopyCheck, Eye, Loader2, Pencil, RotateCcw, Trash2, CheckCircle2, Undo2 } from "lucide-react";
+import { CopyCheck, Eye, Loader2, Pencil, RotateCcw, Trash2, CheckCircle2, Undo2, Send } from "lucide-react";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { CONTENT_TYPE_LABELS } from "@/lib/content-type-labels";
 import { DRAFT_STATUS_BADGE_VARIANT, DRAFT_STATUS_LABELS } from "@/lib/draft-status-labels";
 import { deleteDraft, duplicateDraft, finalizeDraft, restoreDraft, updateDraft } from "@/lib/api/drafts";
+import { submitForApproval } from "@/lib/api/approval";
 import { ApiError } from "@/lib/api/client";
 import type { ContentDraft } from "@/types/drafts";
 import { DraftPreviewSheet } from "@/components/drafts/draft-preview-sheet";
@@ -87,6 +88,15 @@ export function DraftCard({ draft, layout, onChanged, onDeleted, onDuplicated }:
     });
   }
 
+  async function handleSubmitForApproval() {
+    await withBusy("submit", async () => {
+      const response = await submitForApproval(draft.id);
+      if (response.data) {
+        onChanged({ ...draft, status: "READY_FOR_REVIEW" });
+      }
+    });
+  }
+
   return (
     <Card className={cn(layout === "list" && "sm:flex-row sm:items-center")}>
       <CardHeader className={cn(layout === "list" && "sm:w-72 sm:shrink-0")}>
@@ -127,6 +137,12 @@ export function DraftCard({ draft, layout, onChanged, onDeleted, onDuplicated }:
               {busy === "duplicate" ? <Loader2 className="size-3.5 animate-spin" /> : <CopyCheck className="size-3.5" />}
               Duplicate
             </Button>
+            {draft.status === "DRAFT" && (
+              <Button variant="ghost" size="sm" onClick={handleSubmitForApproval} disabled={busy === "submit"}>
+                {busy === "submit" ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+                Submit for Approval
+              </Button>
+            )}
             {draft.status === "APPROVED" ? (
               <Button variant="ghost" size="sm" onClick={handleMoveToDraft} disabled={busy === "unfinalize"}>
                 {busy === "unfinalize" ? <Loader2 className="size-3.5 animate-spin" /> : <Undo2 className="size-3.5" />}

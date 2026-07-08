@@ -58,14 +58,21 @@ services:
       ADMIN_BOOTSTRAP_FIRST_NAME: ${ADMIN_BOOTSTRAP_FIRST_NAME:-Academy}
       ADMIN_BOOTSTRAP_LAST_NAME: ${ADMIN_BOOTSTRAP_LAST_NAME:-Admin}
       STORAGE_ENDPOINT: http://minio:9000
+      # Presigned URLs must be signed against a host the *browser* can resolve -
+      # "minio" only exists on the Compose network, not on the developer's machine.
+      STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://localhost:9000}
       STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-arjun_minio_admin}
       STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-change_me_minio_secret}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-arjun-content-media}
       STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
       STORAGE_PATH_STYLE_ACCESS: ${STORAGE_PATH_STYLE_ACCESS:-true}
+      AI_ACTIVE_PROVIDER: ${AI_ACTIVE_PROVIDER:-openai}
       AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}
       AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
       AI_PROVIDER_MODEL: ${AI_PROVIDER_MODEL:-gpt-4o-mini}
+      AI_GENERATION_TIMEOUT_SECONDS: ${AI_GENERATION_TIMEOUT_SECONDS:-30}
+      AI_GENERATION_MAX_TOKENS: ${AI_GENERATION_MAX_TOKENS:-700}
+      AI_GENERATION_TEMPERATURE: ${AI_GENERATION_TEMPERATURE:-0.8}
       IG_GRAPH_API_BASE_URL: ${IG_GRAPH_API_BASE_URL:-https://graph.facebook.com/v19.0}
       IG_APP_ID: ${IG_APP_ID:-}
       IG_APP_SECRET: ${IG_APP_SECRET:-}

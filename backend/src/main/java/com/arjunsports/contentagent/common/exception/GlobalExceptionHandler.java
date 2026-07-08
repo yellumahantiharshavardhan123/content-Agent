@@ -1,6 +1,7 @@
 package com.arjunsports.contentagent.common.exception;
 
 import com.arjunsports.contentagent.common.dto.ApiResponse;
+import com.arjunsports.contentagent.modules.ai.provider.AIProviderException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -36,6 +37,23 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(UnauthorizedException.class)
     public ResponseEntity<ApiResponse<Void>> handleUnauthorized(UnauthorizedException ex) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ApiResponse<Void>> handleRateLimit(RateLimitExceededException ex) {
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(AIProviderException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAIProviderError(AIProviderException ex) {
+        HttpStatus status = switch (ex.getReason()) {
+            case TIMEOUT -> HttpStatus.GATEWAY_TIMEOUT;
+            case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
+            case UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+            case INVALID_RESPONSE, UNKNOWN -> HttpStatus.BAD_GATEWAY;
+        };
+        log.warn("AI provider error [{}]: {}", ex.getReason(), ex.getMessage());
+        return ResponseEntity.status(status).body(ApiResponse.error(ex.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

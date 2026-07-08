@@ -92,6 +92,16 @@
             <artifactId>minio</artifactId>
             <version>${minio.version}</version>
         </dependency>
+        <!-- Pinned: minio 9.0.3 transitively pulls okhttp 5.3.2, which publishes an
+             empty Kotlin-Multiplatform root artifact under plain Maven resolution
+             (no actual classes - Gradle's module metadata variant resolution is
+             required to get the real JVM jar, which Maven doesn't support). Pinning
+             the last pre-KMP-repackaging release here overrides that transitive pick. -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+            <version>4.12.0</version>
+        </dependency>
 
         <!-- Rate limiting -->
         <dependency>

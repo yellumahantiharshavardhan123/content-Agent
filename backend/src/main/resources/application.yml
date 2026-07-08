@@ -23,8 +23,8 @@ spring:
     locations: classpath:db/migration
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      max-file-size: 200MB
+      max-request-size: 200MB
 
 server:
   port: ${SERVER_PORT:8080}
@@ -47,16 +47,22 @@ app:
     last-name: ${ADMIN_BOOTSTRAP_LAST_NAME:Admin}
   storage:
     endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+    public-endpoint: ${STORAGE_PUBLIC_ENDPOINT:${STORAGE_ENDPOINT:http://localhost:9000}}
     access-key: ${STORAGE_ACCESS_KEY:}
     secret-key: ${STORAGE_SECRET_KEY:}
     bucket: ${STORAGE_BUCKET:arjun-content-media}
     region: ${STORAGE_REGION:us-east-1}
     path-style-access: ${STORAGE_PATH_STYLE_ACCESS:true}
   ai:
+    active-provider: ${AI_ACTIVE_PROVIDER:openai}
     provider:
       base-url: ${AI_PROVIDER_BASE_URL:https://api.openai.com/v1}
       api-key: ${AI_PROVIDER_API_KEY:}
       model: ${AI_PROVIDER_MODEL:gpt-4o-mini}
+    generation:
+      timeout-seconds: ${AI_GENERATION_TIMEOUT_SECONDS:30}
+      max-tokens: ${AI_GENERATION_MAX_TOKENS:700}
+      temperature: ${AI_GENERATION_TEMPERATURE:0.8}
   instagram:
     graph-api-base-url: ${IG_GRAPH_API_BASE_URL:https://graph.facebook.com/v19.0}
     app-id: ${IG_APP_ID:}

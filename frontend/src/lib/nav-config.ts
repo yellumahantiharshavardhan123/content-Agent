@@ -25,8 +25,8 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, moduleNumber: 0, status: "available" },
-  { label: "Media Upload", href: "/media", icon: UploadCloud, moduleNumber: 3, status: "upcoming" },
-  { label: "AI Content Generator", href: "/content", icon: Sparkles, moduleNumber: 4, status: "upcoming" },
+  { label: "Media Upload", href: "/media", icon: UploadCloud, moduleNumber: 2, status: "available" },
+  { label: "AI Content Generator", href: "/content", icon: Sparkles, moduleNumber: 3, status: "available" },
   { label: "Drafts", href: "/drafts", icon: FileText, moduleNumber: 5, status: "upcoming" },
   { label: "Approvals", href: "/approvals", icon: CheckSquare, moduleNumber: 6, status: "upcoming" },
   { label: "Instagram Publisher", href: "/instagram", icon: Camera, moduleNumber: 7, status: "upcoming" },

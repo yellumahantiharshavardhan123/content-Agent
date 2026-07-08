@@ -6,6 +6,12 @@ app:
   cookie:
     # Plain HTTP over localhost in dev - Secure cookies would never be sent.
     secure: ${COOKIE_SECURE:false}
+  ai:
+    # No real API key required for local dev/testing - MockAIProvider (only ever
+    # registered under this profile, see its class Javadoc) stands in by default.
+    # Still overridable: set AI_ACTIVE_PROVIDER=openai to test against a real key
+    # while on this profile.
+    active-provider: ${AI_ACTIVE_PROVIDER:mock}
 
 logging:
   level:

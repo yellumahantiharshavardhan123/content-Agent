@@ -2,6 +2,7 @@ package com.arjunsports.contentagent.common.exception;
 
 import com.arjunsports.contentagent.common.dto.ApiResponse;
 import com.arjunsports.contentagent.modules.ai.provider.AIProviderException;
+import com.arjunsports.contentagent.modules.instagram.provider.InstagramPublisherException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -53,6 +54,19 @@ public class GlobalExceptionHandler {
             case INVALID_RESPONSE, UNKNOWN -> HttpStatus.BAD_GATEWAY;
         };
         log.warn("AI provider error [{}]: {}", ex.getReason(), ex.getMessage());
+        return ResponseEntity.status(status).body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(InstagramPublisherException.class)
+    public ResponseEntity<ApiResponse<Void>> handleInstagramPublisherError(InstagramPublisherException ex) {
+        HttpStatus status = switch (ex.getReason()) {
+            case INVALID_CREDENTIALS -> HttpStatus.UNAUTHORIZED;
+            case INVALID_MEDIA -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
+            case TIMEOUT -> HttpStatus.GATEWAY_TIMEOUT;
+            case UNAVAILABLE, UNKNOWN -> HttpStatus.SERVICE_UNAVAILABLE;
+        };
+        log.warn("Instagram publisher error [{}]: {}", ex.getReason(), ex.getMessage());
         return ResponseEntity.status(status).body(ApiResponse.error(ex.getMessage()));
     }
 

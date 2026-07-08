@@ -2,7 +2,7 @@
 
 **Engine:** PostgreSQL 16. **Schema ownership:** Flyway migrations only (`spring.jpa.hibernate.ddl-auto: validate` — Hibernate never generates or alters DDL, it only verifies entity mappings match what Flyway created). **Primary keys:** every table uses a `UUID` generated application-side by Hibernate (`@UuidGenerator`), so no table relies on a database-side default or the `pgcrypto`/`uuid-ossp` extensions.
 
-This document covers exactly the fourteen tables that exist after migrations `V1` through `V7`. No table described here is speculative.
+This document covers exactly the seventeen tables that exist after migrations `V1` through `V8`. No table described here is speculative.
 
 ---
 
@@ -188,6 +188,74 @@ This document covers exactly the fourteen tables that exist after migrations `V1
 └───────────────────┘
 (immutable append-only log, like generation_history -
  no updated_at/updated_by)
+```
+
+### Module 6 addition (`V8`)
+
+```
+┌───────────────────────────┐
+│    instagram_accounts       │
+├───────────────────────────┤
+│ PK id               UUID   │
+│    business_account_id  VARCHAR│
+│    facebook_page_id  VARCHAR│
+│    username         VARCHAR│
+│    access_token_encrypted TEXT│  (AES-256-GCM ciphertext, never
+│                             │   plaintext - see ARCHITECTURE.md §9)
+│    is_active        BOOLEAN│  (unique partial index: at most
+│    connected_at TIMESTAMPTZ│   one is_active=TRUE row at a time)
+│    disconnected_at TIMESTAMPTZ│
+│    created_at   TIMESTAMPTZ│
+│    updated_at   TIMESTAMPTZ│
+│    created_by       UUID   │
+│    updated_by       UUID   │
+└─────────────┬─────────────┘
+              │ 0..1 (ON DELETE SET NULL, plain UUID column - no @ManyToOne)
+              ▼
+┌───────────────────────────┐
+│      instagram_posts         │◄──────────────┐
+├───────────────────────────┤                 │ 0..1 (ON DELETE
+│ PK id               UUID   │                 │  SET NULL)
+│ FK approval_id       UUID   │─────────────────┘
+│    (→ approvals(id))       │  (one row per publish ATTEMPT, not
+│ FK instagram_account_id UUID│   one row mutated per approval - a
+│ FK media_id          UUID   │──── ON DELETE SET NULL → media(id)
+│    caption               TEXT│
+│    hashtags               TEXT│
+│    status            VARCHAR│  enum InstagramPostStatus: PENDING,
+│                             │  PUBLISHED, FAILED
+│    instagram_media_id VARCHAR│  (the real/mock Graph API media id)
+│    permalink         VARCHAR│
+│    publisher_name    VARCHAR│  ("meta-graph-api" or "mock" - which
+│                             │   publisher actually handled this attempt)
+│    error_message         TEXT│  (populated only when status = FAILED)
+│    published_at TIMESTAMPTZ│
+│    created_at   TIMESTAMPTZ│
+│    updated_at   TIMESTAMPTZ│
+│    created_by       UUID   │
+│    updated_by       UUID   │
+└─────────────┬─────────────┘
+              │ 0..1 (ON DELETE SET NULL, plain UUID column - no @ManyToOne)
+              ▼
+┌───────────────────────────┐
+│  instagram_publish_history   │
+├───────────────────────────┤
+│ PK id               UUID   │
+│    instagram_post_id UUID  │  (nullable - CONNECT/DISCONNECT
+│                             │   entries have no post)
+│    action            VARCHAR│  enum InstagramHistoryAction: CONNECT,
+│                             │  DISCONNECT, PUBLISH_ATTEMPT,
+│                             │  PUBLISH_SUCCESS, PUBLISH_FAILURE, RETRY
+│    status            VARCHAR│  (nullable - null for CONNECT/DISCONNECT)
+│    publisher_name    VARCHAR│
+│    error_message         TEXT│
+│    actor_id          UUID   │  (denormalized, no FK - same reasoning
+│    actor_email       VARCHAR│   as activity_log/generation_history)
+│    created_at   TIMESTAMPTZ│
+└───────────────────────────┘
+(immutable append-only log, like generation_history -
+ no updated_at/updated_by; a global feed across every
+ account/post, not scoped to one post)
 ```
 
 ## 2. Tables
@@ -411,6 +479,58 @@ No `updated_at`/`updated_by`: like `generation_history`, this is an immutable ap
 
 Unlike every other Module 2–5 foreign key (`ON DELETE SET NULL`), this one is **`ON DELETE CASCADE`**: a comment has no independent meaning once its parent approval is gone, whereas `approval_history` is a cross-cutting audit record expected to outlive whatever it references (see §1 for the same reasoning applied to `activity_log`/`notifications`).
 
+### `instagram_accounts` (Module 6)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `business_account_id` | VARCHAR(100) | NOT NULL (the Instagram Business Account id, verified against the active publisher at connect time) |
+| `facebook_page_id` | VARCHAR(100) | nullable (the linked Facebook Page id — the Graph API's publish flow is keyed off the IG Business Account id, not this column, but it's kept for reference/future use) |
+| `username` | VARCHAR(150) | nullable (returned by `verifyAccount()` at connect time) |
+| `access_token_encrypted` | TEXT | NOT NULL — AES-256-GCM ciphertext (`base64(iv \|\| ciphertext)`), never the raw token (see `ARCHITECTURE.md` §9) |
+| `is_active` | BOOLEAN | NOT NULL, DEFAULT `TRUE` |
+| `connected_at` | TIMESTAMPTZ | NOT NULL |
+| `disconnected_at` | TIMESTAMPTZ | nullable |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+Disconnecting sets `is_active = false` and `disconnected_at` — the row is never deleted, so `instagram_posts`/`instagram_publish_history` rows keep a valid (if now-inactive) back-reference and the account's publish history remains attributable after a reconnect to a different account.
+
+### `instagram_posts` (Module 6)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `approval_id` | UUID | nullable, FK → `approvals(id)` **ON DELETE SET NULL** |
+| `instagram_account_id` | UUID | nullable, FK → `instagram_accounts(id)` **ON DELETE SET NULL** |
+| `media_id` | UUID | nullable, FK → `media(id)` **ON DELETE SET NULL** |
+| `caption` | TEXT | NOT NULL |
+| `hashtags` | TEXT | nullable |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT `'PENDING'` — enum `InstagramPostStatus`: `PENDING`, `PUBLISHED`, `FAILED` |
+| `instagram_media_id` | VARCHAR(100) | nullable (the real or mock Graph API media id, set only on success) |
+| `permalink` | VARCHAR(500) | nullable (set only on success; the real publisher's permalink fetch is best-effort — a successful publish with a `null` permalink is still `PUBLISHED`, not `FAILED`) |
+| `publisher_name` | VARCHAR(40) | nullable (`"meta-graph-api"` or `"mock"` — which publisher actually handled this specific attempt, independent of the *current* `app.instagram.active-publisher` value) |
+| `error_message` | TEXT | nullable (populated only when `status = FAILED`) |
+| `published_at` | TIMESTAMPTZ | nullable |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+One row is inserted **per publish attempt**, not one row updated in place per approval — a failed attempt followed by a successful retry produces two rows (one `FAILED`, one `PUBLISHED`), both individually queryable. "Already published" and "is this a retry" are both answered by `existsByApprovalIdAndStatus(approvalId, status)` rather than a single mutable status column on the approval itself. Deliberately **not** inserted before the publisher call succeeds or fails — see `INSTAGRAM_PUBLISHER.md` for why the row is built in memory and only persisted afterward.
+
+### `instagram_publish_history` (Module 6)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `instagram_post_id` | UUID | nullable, FK → `instagram_posts(id)` **ON DELETE SET NULL** (null for `CONNECT`/`DISCONNECT` entries, which have no associated post) |
+| `action` | VARCHAR(20) | NOT NULL — enum `InstagramHistoryAction`: `CONNECT`, `DISCONNECT`, `PUBLISH_ATTEMPT`, `PUBLISH_SUCCESS`, `PUBLISH_FAILURE`, `RETRY` |
+| `status` | VARCHAR(20) | nullable (mirrors the resulting `InstagramPostStatus`; null for `CONNECT`/`DISCONNECT`) |
+| `publisher_name` | VARCHAR(40) | nullable |
+| `error_message` | TEXT | nullable |
+| `actor_id` | UUID | nullable (denormalized, no FK — same reasoning as `activity_log`) |
+| `actor_email` | VARCHAR(255) | nullable |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+
+No `updated_at`/`updated_by`: like `generation_history`/`approval_history`, this is an immutable append-only log. Unlike those two, it is a **global** feed — `GET /api/instagram/history` returns every connect/disconnect/publish attempt across every account and post ever created, newest first, not scoped to a single entity.
+
 ## 3. Relationships
 
 | Relationship | Cardinality | Enforcement |
@@ -427,8 +547,12 @@ Unlike every other Module 2–5 foreign key (`ON DELETE SET NULL`), this one is 
 | `content_drafts` → `approvals` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 | `approvals` → `approval_history` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 | `approvals` → `approval_comments` | 1 → N | Database FK, `ON DELETE CASCADE` |
+| `approvals` → `instagram_posts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `instagram_accounts` → `instagram_posts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `media` → `instagram_posts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `instagram_posts` → `instagram_publish_history` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 
-`app_settings` has no relationships to any other table. Every FK introduced in Modules 2–5 uses `ON DELETE SET NULL` rather than `CASCADE` or a hard `@ManyToOne` — deleting a `media`/`generated_content`/`prompt_templates`/`content_drafts` row never cascades or fails; dependent rows just lose the back-reference and keep whatever they've denormalized for their own display (see `ARCHITECTURE.md` §15) — **except** `approval_comments`, which is intentionally `CASCADE` since a comment has no meaning independent of its parent approval.
+`app_settings` has no relationships to any other table. Every FK introduced in Modules 2–6 uses `ON DELETE SET NULL` rather than `CASCADE` or a hard `@ManyToOne` — deleting a `media`/`generated_content`/`prompt_templates`/`content_drafts`/`approvals`/`instagram_accounts`/`instagram_posts` row never cascades or fails; dependent rows just lose the back-reference and keep whatever they've denormalized for their own display (see `ARCHITECTURE.md` §15) — **except** `approval_comments`, which is intentionally `CASCADE` since a comment has no meaning independent of its parent approval.
 
 ## 4. Constraints
 
@@ -437,6 +561,7 @@ Unlike every other Module 2–5 foreign key (`ON DELETE SET NULL`), this one is 
 - `prompt_templates` has a **partial unique index** — `UNIQUE (content_type) WHERE is_active = TRUE` — enforcing exactly one active template per content type at the database level (not just the application layer).
 - `approvals` has a **partial unique index** — `UNIQUE (content_id) WHERE status = 'PENDING_APPROVAL'` — enforcing at most one outstanding review request per draft at the database level, the same defense-in-depth pattern as `prompt_templates`.
 - `approval_comments.approval_id` is a `NOT NULL` foreign key with `ON DELETE CASCADE` — deleting an approval removes its comment thread.
+- `instagram_accounts` has a **partial unique index** — `UNIQUE (is_active) WHERE is_active = TRUE` — enforcing at most one currently-connected account at the database level (mirrors `InstagramValidator.validateNoActiveConnection`, the same defense-in-depth pattern as `prompt_templates`/`approvals`).
 - All boolean flags (`is_active`, `revoked`, `used`, `is_read`, `is_secret`, `is_deleted`, `is_draft`, `is_edited`) are `NOT NULL` with an explicit `DEFAULT`.
 - All timestamp columns use `TIMESTAMPTZ` (timezone-aware), and Hibernate is configured with `hibernate.jdbc.time_zone: UTC` so every stored instant is unambiguous.
 
@@ -477,8 +602,16 @@ Unlike every other Module 2–5 foreign key (`ON DELETE SET NULL`), this one is 
 | `idx_approval_history_approval` | `approval_history` | `approval_id` | History for one specific review cycle |
 | `idx_approval_history_created_at` | `approval_history` | `created_at DESC` | Recent-first listing |
 | `idx_approval_comments_approval` | `approval_comments` | `approval_id, created_at` | Comment thread for one approval, oldest-first |
+| `idx_instagram_accounts_active` | `instagram_accounts` | `is_active` | Connection status lookup (`findByActiveTrue`) |
+| `idx_instagram_accounts_one_active` | `instagram_accounts` | `is_active` (unique, partial `WHERE is_active = TRUE`) | Enforces at most one currently-connected account |
+| `idx_instagram_posts_approval` | `instagram_posts` | `approval_id` | Already-published / is-retry checks (`existsByApprovalIdAndStatus`) |
+| `idx_instagram_posts_account` | `instagram_posts` | `instagram_account_id` | "posts published by this account" queries |
+| `idx_instagram_posts_status` | `instagram_posts` | `status` | Filtering by `PENDING`/`PUBLISHED`/`FAILED` |
+| `idx_instagram_posts_created_at` | `instagram_posts` | `created_at DESC` | Recent-first listing |
+| `idx_instagram_publish_history_post` | `instagram_publish_history` | `instagram_post_id` | History for one specific post |
+| `idx_instagram_publish_history_created_at` | `instagram_publish_history` | `created_at DESC` | `GET /api/instagram/history`, recent-first |
 
-Every index above backs an actual repository query method or `Specification` predicate that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`, `DraftSpecifications`, `ApprovalSpecifications`) — none are speculative.
+Every index above backs an actual repository query method or `Specification` predicate that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`, `DraftSpecifications`, `ApprovalSpecifications`, `InstagramAccountRepository.findByActiveTrue`) — none are speculative.
 
 ## 6. Flyway Migrations
 
@@ -491,14 +624,15 @@ Every index above backs an actual repository query method or `Specification` pre
 | `V5` | `V5__prompt_template_seed.sql` | Module 3 | Seeds one active `prompt_templates` row per content type (17 rows) |
 | `V6` | `V6__content_drafts.sql` | Module 4 | `content_drafts` + its indexes and foreign keys |
 | `V7` | `V7__approval_workflow.sql` | Module 5 | `approvals`, `approval_history`, `approval_comments` + their indexes and foreign keys |
+| `V8` | `V8__instagram_publisher.sql` | Module 6 | `instagram_accounts`, `instagram_posts`, `instagram_publish_history` + their indexes and foreign keys |
 
-All seven have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed integration tests for each module, each of which boots a disposable Postgres container and runs every migration before its tests execute).
+All eight have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed integration tests for each module, each of which boots a disposable Postgres container and runs every migration before its tests execute).
 
 ## 7. Future Database Roadmap
 
 Not yet designed or migrated — listed here only to show what the current schema deliberately leaves room for, not as a commitment to a specific column layout:
 
-- **Publish record** table(s) for Instagram/website publishing history, most likely referencing `approvals(id)` or `content_drafts(id)` the same `ON DELETE SET NULL` way Module 5 references `content_drafts`.
+- **Publish record** table(s) for website publishing history, most likely referencing `approvals(id)` or `content_drafts(id)` the same `ON DELETE SET NULL` way `instagram_posts` references `approvals(id)` today.
 - **Schedule** table(s) for the scheduler module.
 - Full CRUD usage of the existing `app_settings` table by the Application Settings module.
 - Possible introduction of additional `Role` enum values (e.g. `EDITOR`, or a distinct reviewer/approver role) — the `users.role` column already supports this without a migration, since it is a plain `VARCHAR` validated at the application layer, not a database `CHECK`/`ENUM` type. Module 5's "Only ADMIN can approve" rule is enforced purely at `@PreAuthorize`, so introducing a narrower reviewer role later is a controller-annotation change, not a schema change.

@@ -29,7 +29,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "AI Content Generator", href: "/content", icon: Sparkles, moduleNumber: 3, status: "available" },
   { label: "Drafts", href: "/drafts", icon: FileText, moduleNumber: 4, status: "available" },
   { label: "Approvals", href: "/approvals", icon: CheckSquare, moduleNumber: 5, status: "available" },
-  { label: "Instagram Publisher", href: "/instagram", icon: Camera, moduleNumber: 7, status: "upcoming" },
+  { label: "Instagram Publisher", href: "/instagram", icon: Camera, moduleNumber: 6, status: "available" },
   { label: "Website Publisher", href: "/website", icon: Globe, moduleNumber: 8, status: "upcoming" },
   { label: "Scheduler", href: "/scheduler", icon: CalendarClock, moduleNumber: 9, status: "upcoming" },
   { label: "Analytics", href: "/analytics", icon: BarChart3, moduleNumber: 10, status: "upcoming" },

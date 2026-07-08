@@ -1,6 +1,6 @@
 # Architecture — Arjun Sports AI Content Agent
 
-**Status:** Reflects Module 0 (Foundation & Scaffolding) and Module 1 (Authentication & Authorization) as actually implemented. No feature described below exists only as a plan; anything not yet built is explicitly called out as "not yet implemented."
+**Status:** Reflects Modules 0 through 6 as actually implemented. No feature described below exists only as a plan; anything not yet built is explicitly called out as "not yet implemented."
 
 ---
 
@@ -8,10 +8,15 @@
 
 Arjun Sports AI Content Agent is an AI-assisted content marketing system being built for Arjun Sports Shooting Academy. The intended end state (not all delivered yet) is: upload media → generate AI content (Instagram captions, blog posts, SEO metadata, reel scripts) → review and approve it → publish to Instagram and the academy website → track history on a schedule.
 
-The system is delivered module-by-module. As of this document, two modules are complete:
+The system is delivered module-by-module. As of this document, six modules are complete:
 
 - **Module 0 — Foundation & Scaffolding**: monorepo layout, Spring Boot bootstrap, cross-cutting audit logging and in-app notifications, a settings entity scaffold, and a Next.js dashboard shell.
 - **Module 1 — Authentication & Authorization**: a complete JWT-based auth system (login, logout, refresh with rotation, current-user, change password, forgot/reset password architecture), role-based authorization, and the matching Next.js login/session UI.
+- **Module 2 — Media Upload**: MinIO-backed storage with per-type validation and a Next.js media library.
+- **Module 3 — AI Content Generation**: a provider-agnostic AI generation layer producing all 17 content types from DB-backed, versioned prompt templates.
+- **Module 4 — Content Draft Management**: a curation/review layer on top of Module 3's raw generated content.
+- **Module 5 — Approval Workflow**: a review cycle on top of Module 4's drafts.
+- **Module 6 — Instagram Publisher**: connects an Instagram Business Account and publishes `READY_FOR_PUBLISH` approvals to it, via a Strategy-pattern publisher abstraction swappable between the real Meta Graph API and a `dev`-only mock.
 
 ## 2. Goals and Objectives
 
@@ -105,7 +110,8 @@ com.arjunsports.contentagent
 │   ├── exception/                   Custom exceptions + GlobalExceptionHandler (@RestControllerAdvice)
 │   ├── notification/                In-app notification core (Module 0, used by Module 1)
 │   ├── security/                    AuthenticatedActor marker interface
-│   ├── util/                        SecureTokenUtil (opaque token generation/hashing)
+│   ├── util/                        SecureTokenUtil (opaque token generation/hashing),
+│   │                                 CredentialEncryptionUtil (AES-256-GCM, Module 6)
 │   └── validation/                  Shared Bean Validation regex constants
 ├── config/                          SecurityConfig, CorsConfig, JpaAuditingConfig, OpenApiConfig
 ├── modules/
@@ -118,36 +124,50 @@ com.arjunsports.contentagent
 │   │   └── dto/
 │   ├── draft/                       ContentDraft: save/edit/duplicate/restore/finalize workflow (Module 4)
 │   │   └── dto/
-│   └── approval/                    Approval workflow on top of ContentDraft (Module 5)
-│       ├── entity/                  Approval, ApprovalHistory, ApprovalComment, ApprovalStatus, ApprovalAction
-│       ├── repository/               ApprovalRepository (+Specifications), ApprovalHistoryRepository, ApprovalCommentRepository
-│       ├── service/ + service/impl/  ApprovalService / ApprovalServiceImpl
-│       ├── controller/               ApprovalController
-│       ├── mapper/                   ApprovalMapper
-│       ├── validation/               ApprovalValidator
-│       └── dto/
+│   ├── approval/                    Approval workflow on top of ContentDraft (Module 5)
+│   │   ├── entity/                  Approval, ApprovalHistory, ApprovalComment, ApprovalStatus, ApprovalAction
+│   │   ├── repository/               ApprovalRepository (+Specifications), ApprovalHistoryRepository, ApprovalCommentRepository
+│   │   ├── service/ + service/impl/  ApprovalService / ApprovalServiceImpl
+│   │   ├── controller/               ApprovalController
+│   │   ├── mapper/                   ApprovalMapper
+│   │   ├── validation/               ApprovalValidator
+│   │   └── dto/
+│   └── instagram/                   Instagram publishing on top of Approval (Module 6)
+│       ├── entity/                  InstagramAccount, InstagramPost, InstagramPostStatus,
+│       │                             InstagramPublishHistory, InstagramHistoryAction
+│       ├── provider/                 InstagramPublisher interface + MetaGraphPublisher,
+│       │                             MockInstagramPublisher (@Profile("dev")), PublisherResolver,
+│       │                             InstagramPublisherException, InstagramPublisherProperties
+│       ├── repository/               InstagramAccountRepository, InstagramPostRepository,
+│       │                             InstagramPublishHistoryRepository
+│       ├── service/ + service/impl/  InstagramService / InstagramServiceImpl, PublishTransactionHelper
+│       ├── controller/               InstagramController
+│       ├── mapper/                   InstagramMapper
+│       ├── validation/               InstagramValidator
+│       ├── dto/
+│       └── InstagramAccountBootstrapRunner   optional env-driven auto-connect on startup
 ├── storage/                         StorageService interface + MinioStorageServiceImpl, dual-endpoint MinioConfig (Module 2)
 └── security/                        JWT provider, cookie handling, filters, rate limiter
 ```
 
-Each feature module under `modules/` follows Repository Pattern: `entity → repository → service (interface + impl) → controller → dto`. Controllers never touch repositories directly. Module 5 is the one exception to the otherwise-flat per-module package layout Modules 2–4 use (`entity/`, `repository/`, `service/`+`service/impl/`, `controller/`, `mapper/`, `validation/` as explicit subpackages rather than files directly under `modules/approval/`) — an explicit, deliberate structural choice for this module, not an inconsistency.
+Each feature module under `modules/` follows Repository Pattern: `entity → repository → service (interface + impl) → controller → dto`. Controllers never touch repositories directly. Modules 5 and 6 are the exception to the otherwise-flat per-module package layout Modules 2–4 use (`entity/`, `repository/`, `service/`+`service/impl/`, `controller/`, `mapper/`, `validation/` as explicit subpackages rather than files directly under `modules/approval/`/`modules/instagram/`) — an explicit, deliberate structural choice for these modules, not an inconsistency. Module 6 additionally has a `provider/` subpackage, the same Strategy-pattern shape `modules/ai/provider/` established in Module 3 (interface + real impl + `dev`-only mock impl + a resolver bean).
 
 ### Design patterns actually in use
 
 | Pattern | Where | Why |
 |---|---|---|
-| Repository | `UserRepository`, `RefreshTokenRepository`, `PasswordResetTokenRepository`, `ActivityLogRepository`, `NotificationRepository`, `AppSettingRepository`, `MediaRepository`, `PromptRepository`, `GeneratedContentRepository`, `GenerationHistoryRepository`, `DraftRepository`, `ApprovalRepository`, `ApprovalHistoryRepository`, `ApprovalCommentRepository` | Spring Data JPA abstracts persistence behind an interface per aggregate. |
-| Service interface + impl | `AuthService`, `UserService`, `RefreshTokenService`, `AuditLogService`, `NotificationService`, `MediaService`, `AIContentService`, `PromptService`, `DraftService`, `ApprovalService` (each with a matching `*Impl`) | Controllers and other services depend on the interface, not the implementation — `NotificationService` in particular is designed so an email/WhatsApp implementation can be added later with zero caller changes. |
-| Strategy | `NotificationService` (single `InAppNotificationServiceImpl` today); `StorageService` (single `MinioStorageServiceImpl` today, swappable to AWS S3 by config only); `AIProvider` (single `OpenAICompatibleProvider` today plus a `@Profile("dev")`-gated `MockAIProvider`, resolved by name via `AIProviderResolver` so Gemini/Claude/Azure/Ollama can be added as further implementations with zero caller changes) | Same reasoning across all three: callers depend only on the interface. |
+| Repository | `UserRepository`, `RefreshTokenRepository`, `PasswordResetTokenRepository`, `ActivityLogRepository`, `NotificationRepository`, `AppSettingRepository`, `MediaRepository`, `PromptRepository`, `GeneratedContentRepository`, `GenerationHistoryRepository`, `DraftRepository`, `ApprovalRepository`, `ApprovalHistoryRepository`, `ApprovalCommentRepository`, `InstagramAccountRepository`, `InstagramPostRepository`, `InstagramPublishHistoryRepository` | Spring Data JPA abstracts persistence behind an interface per aggregate. |
+| Service interface + impl | `AuthService`, `UserService`, `RefreshTokenService`, `AuditLogService`, `NotificationService`, `MediaService`, `AIContentService`, `PromptService`, `DraftService`, `ApprovalService`, `InstagramService` (each with a matching `*Impl`) | Controllers and other services depend on the interface, not the implementation — `NotificationService` in particular is designed so an email/WhatsApp implementation can be added later with zero caller changes. |
+| Strategy | `NotificationService` (single `InAppNotificationServiceImpl` today); `StorageService` (single `MinioStorageServiceImpl` today, swappable to AWS S3 by config only); `AIProvider` (single `OpenAICompatibleProvider` today plus a `@Profile("dev")`-gated `MockAIProvider`, resolved by name via `AIProviderResolver`); `InstagramPublisher` (`MetaGraphPublisher` — the real Meta Graph API — plus a `@Profile("dev")`-gated `MockInstagramPublisher`, resolved by name via `PublisherResolver` off `app.instagram.active-publisher`) | Same reasoning across all four: callers depend only on the interface, so Gemini/Claude/Azure/Ollama (AI) or a future Facebook/TikTok cross-poster (Instagram) can be added as further implementations with zero caller changes. `InstagramServiceImpl` never imports `MetaGraphPublisher` or `MockInstagramPublisher` directly — only `InstagramPublisher` and `PublisherResolver`. |
 | Specification | `DraftSpecifications` (search/status/contentType/mediaId for `GET /api/drafts`); `ApprovalSpecifications` (status/search/date-range for `GET /api/approval/pending`) - both via `JpaSpecificationExecutor`, instead of an exploding number of derived query methods | Any endpoint needing free-text search combined with several independent optional filters plus pagination and sorting. |
 | DTO | Every request/response type under `*/dto` | Entities are never serialized directly to JSON. |
-| Mapper | `DraftMapper`, `ApprovalMapper` (entity → response DTO) | Modules 1–3 fold this into a static `Response.from(entity)` factory; Modules 4–5 use a dedicated `@Component` instead, since a curation/workflow-layer entity is more likely to need mapping logic that depends on more than just the entity itself (e.g. `ApprovalMapper` assembles the comment list alongside the approval itself). |
-| Global exception handling | `GlobalExceptionHandler` (`@RestControllerAdvice`) | Centralizes HTTP status mapping for all controller-thrown exceptions; `ResourceNotFoundException`/`BadRequestException`/`ConflictException` are generic enough that Modules 2–5 reuse them as-is with no new exception types. |
+| Mapper | `DraftMapper`, `ApprovalMapper`, `InstagramMapper` (entity → response DTO) | Modules 1–3 fold this into a static `Response.from(entity)` factory; Modules 4–6 use a dedicated `@Component` instead, since a curation/workflow-layer entity is more likely to need mapping logic that depends on more than just the entity itself (e.g. `ApprovalMapper` assembles the comment list alongside the approval itself). |
+| Global exception handling | `GlobalExceptionHandler` (`@RestControllerAdvice`) | Centralizes HTTP status mapping for all controller-thrown exceptions; `ResourceNotFoundException`/`BadRequestException`/`ConflictException` are generic enough that Modules 2–6 reuse them as-is with no new exception types (Module 6 adds one genuinely new type, `InstagramPublisherException`, for third-party publisher errors that need their own `Reason` → HTTP status mapping). |
 | Chain of Responsibility | Servlet filter chain: CORS → `JwtAuthenticationFilter` → Spring Security authorization → controller | Standard Spring Security filter chain composition. |
-| Builder | Lombok `@Builder` on `User`, `RefreshToken`, `PasswordResetToken`, `Notification`, `ActivityLog`, `AppSetting`, `Media`, `PromptTemplate`, `GeneratedContent`, `GenerationHistory`, `ContentDraft`, `Approval`, `ApprovalHistory`, `ApprovalComment` | Readable, immutable-style entity construction. |
+| Builder | Lombok `@Builder` on `User`, `RefreshToken`, `PasswordResetToken`, `Notification`, `ActivityLog`, `AppSetting`, `Media`, `PromptTemplate`, `GeneratedContent`, `GenerationHistory`, `ContentDraft`, `Approval`, `ApprovalHistory`, `ApprovalComment`, `InstagramAccount`, `InstagramPost`, `InstagramPublishHistory` | Readable, immutable-style entity construction. |
 | Template/Marker interface | `AuthenticatedActor` | Lets `common` (JPA auditing, audit log) resolve "who is acting" without depending on the concrete `User`/`UserPrincipal` type in `modules/user`. |
-| `REQUIRES_NEW` transaction escape hatch | `GenerationFailureRecorder` (Module 3) | A `FAILED` history/audit/notification record must survive even when the triggering `@Transactional` method re-throws and rolls back — a separate bean with `@Transactional(propagation = REQUIRES_NEW)` commits independently of the caller's transaction. |
-| State machine (lightweight, service-enforced) | `Approval.status` (`PENDING_APPROVAL → APPROVED/REJECTED → READY_FOR_PUBLISH`), guarded in `ApprovalServiceImpl`/`ApprovalValidator` rather than a dedicated state-machine library | The full set of transitions is small and unlikely to grow quickly enough to justify a framework; a partial unique index (`one PENDING_APPROVAL per content_id`) backs the same guarantee at the database level as defense in depth. |
+| `REQUIRES_NEW` transaction escape hatch | `GenerationFailureRecorder` (Module 3); `PublishTransactionHelper` (Module 6) | A `FAILED` history/audit/notification record — and, in Module 6's case, the `PUBLISH_STARTED` notification fired *before* the publisher call — must survive even when the triggering `@Transactional` method re-throws and rolls back. A separate bean with `@Transactional(propagation = REQUIRES_NEW)` commits independently of the caller's transaction. Module 6 initially fired the started-notification directly inside `doPublish()`'s own transaction; manual verification caught that a failed publish silently erased it on rollback, which is why it also moved behind this same escape hatch (see `INSTAGRAM_PUBLISHER.md` §Bugs Found for the full story). |
+| State machine (lightweight, service-enforced) | `Approval.status` (`PENDING_APPROVAL → APPROVED/REJECTED → READY_FOR_PUBLISH`), guarded in `ApprovalServiceImpl`/`ApprovalValidator`; `InstagramPost.status` (`PUBLISHED`/`FAILED`, one row per attempt rather than one row transitioning in place), guarded in `InstagramServiceImpl`/`InstagramValidator` — neither uses a dedicated state-machine library | The full set of transitions is small and unlikely to grow quickly enough to justify a framework; a partial unique index (`one PENDING_APPROVAL per content_id`; `one active instagram_accounts row`) backs the equivalent guarantee at the database level as defense in depth. |
 
 ## 7. Frontend Architecture
 
@@ -164,18 +184,21 @@ frontend/src/
 │   └── (dashboard)/
 │       ├── layout.tsx             Async Server Component: fetches current user, redirects if absent
 │       ├── dashboard/page.tsx     Overview page (module roadmap + live backend health check)
-│       └── {media,content,drafts,approvals,instagram,website,scheduler,
-│           analytics,settings,activity-log,notifications}/page.tsx
+│       ├── {media,content,drafts,approvals,instagram}/page.tsx
+│       │                           Built out (Modules 2–6)
+│       └── {website,scheduler,analytics,settings,activity-log,
+│           notifications}/page.tsx
 │                                   Placeholder pages for every not-yet-built module
 ├── components/
 │   ├── layout/                    Sidebar, Topbar, MobileNav, ThemeToggle, ChangePasswordDialog
 │   ├── ui/                        shadcn/ui primitives (button, card, dialog, dropdown-menu, ...)
 │   ├── dashboard/                 BackendStatusCard (live health-check widget)
+│   ├── instagram/                 ConnectionPanel, PublishingQueue, PublishDialog, InstagramHistoryList (Module 6)
 │   └── shared/                    ModulePlaceholder (reused by every "coming soon" page)
 ├── lib/
-│   ├── api/                       client.ts (fetch wrapper), auth.ts, health.ts, server-auth.ts
+│   ├── api/                       client.ts (fetch wrapper), auth.ts, health.ts, server-auth.ts, ..., instagram.ts
 │   └── nav-config.ts               Single source of truth for sidebar navigation
-├── types/user.ts                  User/Role/UserStatus TypeScript types
+├── types/{user,...,instagram}.ts  Shared frontend types per module
 └── proxy.ts                       Route guard + silent token refresh (see §9)
 ```
 
@@ -188,7 +211,7 @@ Session data flow: the `(dashboard)` layout is an `async` Server Component. It c
 - **Engine:** PostgreSQL 16.
 - **Migration tool:** Flyway, `spring.jpa.hibernate.ddl-auto: validate` — Hibernate is only ever allowed to *validate* that entity mappings match the schema Flyway created; it can never generate or alter DDL itself.
 - **Primary keys:** every table uses a `UUID` primary key generated **application-side** by Hibernate (`@UuidGenerator` on `BaseEntity`), not a database default — so migrations never depend on `pgcrypto`/`uuid-ossp`.
-- **Migrations applied so far:** `V1__init_schema.sql` (Module 0: `activity_log`, `notifications`, `app_settings`), `V2__auth_and_users.sql` (Module 1: `users`, `refresh_tokens`, `password_reset_tokens`), `V3__media.sql` (Module 2: `media`), `V4__ai_content_generation.sql` (Module 3: `prompt_templates`, `generated_content`, `generation_history`), `V5__prompt_template_seed.sql` (Module 3: seeds the 17 default templates), `V6__content_drafts.sql` (Module 4: `content_drafts`), and `V7__approval_workflow.sql` (Module 5: `approvals`, `approval_history`, `approval_comments`). Full detail in `DATABASE_DESIGN.md`.
+- **Migrations applied so far:** `V1__init_schema.sql` (Module 0: `activity_log`, `notifications`, `app_settings`), `V2__auth_and_users.sql` (Module 1: `users`, `refresh_tokens`, `password_reset_tokens`), `V3__media.sql` (Module 2: `media`), `V4__ai_content_generation.sql` (Module 3: `prompt_templates`, `generated_content`, `generation_history`), `V5__prompt_template_seed.sql` (Module 3: seeds the 17 default templates), `V6__content_drafts.sql` (Module 4: `content_drafts`), `V7__approval_workflow.sql` (Module 5: `approvals`, `approval_history`, `approval_comments`), and `V8__instagram_publisher.sql` (Module 6: `instagram_accounts`, `instagram_posts`, `instagram_publish_history`). Full detail in `DATABASE_DESIGN.md`.
 
 ## 9. Security Architecture
 
@@ -233,6 +256,10 @@ CSRF protection is disabled (`http.csrf(disable)`) because the API is stateless 
 - `BCryptPasswordEncoder` (Spring Security default strength). Passwords are never logged, never returned in any response DTO, and `User.toString()` explicitly excludes the `password` field (`@ToString(exclude = "password")`).
 - Password strength is enforced via a shared regex (`ValidationPatterns.PASSWORD_STRENGTH`): minimum 8 characters, at least one letter and one digit.
 
+### Third-party credential encryption (Module 6)
+
+`CredentialEncryptionUtil` (`common/util`) encrypts Instagram access tokens at rest with **AES-256-GCM** (authenticated encryption, not plain AES-CBC) — distinct from `SecureTokenUtil`'s one-way SHA-256 hashing, since a refresh/reset token only ever needs to be *compared*, while a third-party access token must be *decrypted* again to make Graph API calls on the academy's behalf. A random 96-bit IV is generated per encryption call (`SecureRandom`) and stored alongside the ciphertext (`base64(iv || ciphertext)`) — GCM's authentication tag means any tampering with the stored value fails decryption loudly rather than silently returning corrupted plaintext. The key itself (`app.security.encryption-key`, base64-encoded 32 bytes) is env-injected the same way `app.jwt.secret` is; `CredentialEncryptionUtil`'s constructor fails application startup immediately if the key is missing or not exactly 32 bytes, rather than deferring the failure to the first encrypt/decrypt call. `InstagramAccountResponse` never includes the token field at all (not even encrypted) — the encrypted value exists only in the database and in `InstagramServiceImpl`'s brief in-memory decryption right before a publish call.
+
 ## 10. Docker Architecture
 
 `infra/docker-compose.yml` defines four services:
@@ -270,13 +297,14 @@ See §6 and §7 above for the annotated backend/frontend trees. The guiding rule
 
 ## 15. Future Module Integration Strategy
 
-Modules not yet built (Instagram/website publishing, scheduler, analytics, activity log viewer, notification center UI, settings UI) are expected to plug into infrastructure already in place rather than rebuild it. Modules 2–5 confirmed this works in practice, not just in theory:
+Modules not yet built (website publishing, scheduler, analytics, activity log viewer, notification center UI, settings UI) are expected to plug into infrastructure already in place rather than rebuild it. Modules 2–6 confirmed this works in practice, not just in theory:
 
-- **Audit trail**: call `AuditLogService.record(...)` — used by every module since Auth with zero changes to the interface. Module 4 needed one new `ActivityAction.RESTORE` constant; Module 5 needed `SUBMIT`/`COMMENT` (all additive enum extensions, never a signature change).
-- **Notifications**: call `NotificationService.notify(...)` — same interface since Module 1. Modules 3, 4, and 5 each added their own `NotificationType` constants (`GENERATION_COMPLETED`/`GENERATION_FAILED`; `DRAFT_SAVED`/`DRAFT_UPDATED`/`DRAFT_DELETED`/`DRAFT_RESTORED`; `APPROVAL_COMMENT_ADDED`, plus reusing `APPROVAL_REQUIRED`/`APPROVED`/`REJECTED` that had sat unused in the enum since Module 0) without touching the service itself.
-- **Authorization**: `@PreAuthorize("hasRole('ADMIN')")` (class-level) is the established pattern for admin-only modules (Media, AI, Prompts, Drafts, Approvals all use it identically); new roles are added by extending the `Role` enum, no filter-chain changes required.
+- **Audit trail**: call `AuditLogService.record(...)` — used by every module since Auth with zero changes to the interface. Module 4 needed one new `ActivityAction.RESTORE` constant; Module 5 needed `SUBMIT`/`COMMENT`; Module 6 needed `CONNECT`/`DISCONNECT`/`RETRY` (all additive enum extensions, never a signature change — Module 6 also reuses the pre-existing `PUBLISH` constant for a first-time publish).
+- **Notifications**: call `NotificationService.notify(...)` — same interface since Module 1. Modules 3, 4, 5, and 6 each added their own `NotificationType` constants (`GENERATION_COMPLETED`/`GENERATION_FAILED`; `DRAFT_SAVED`/`DRAFT_UPDATED`/`DRAFT_DELETED`/`DRAFT_RESTORED`; `APPROVAL_COMMENT_ADDED`, plus reusing `APPROVAL_REQUIRED`/`APPROVED`/`REJECTED` that had sat unused in the enum since Module 0; `PUBLISH_STARTED`, plus reusing `PUBLISH_SUCCESS`/`PUBLISH_FAILURE` that had likewise sat unused since Module 0) without touching the service itself.
+- **Authorization**: `@PreAuthorize("hasRole('ADMIN')")` (class-level) is the established pattern for admin-only modules (Media, AI, Prompts, Drafts, Approvals, Instagram all use it identically); new roles are added by extending the `Role` enum, no filter-chain changes required.
 - **Settings**: the `AppSetting` entity/repository scaffold from Module 0 is still awaiting its full CRUD service + controller.
-- **Storage**: the MinIO container and client dependency, provisioned in Module 0, are used as-is by Module 2's `StorageService`.
-- **Navigation**: every future page already has a placeholder route and a `lucide-react` icon registered in `frontend/src/lib/nav-config.ts` — building a module means replacing the placeholder page and flipping its `status` to `"available"`, not adding new routing/shell code.
-- **Cross-module references without hard coupling**: Module 4's `ContentDraft.generatedContentId`/`mediaId` and Module 5's `Approval.contentId` all follow the same pattern Module 3 established for `GeneratedContent.mediaId` — a plain nullable UUID column with `ON DELETE SET NULL`, not a JPA `@ManyToOne`. Deleting a `Media`/`GeneratedContent`/`ContentDraft` row never fails or cascades unexpectedly; dependents just lose the back-reference and keep their own denormalized copy of whatever they needed to display (`ContentDraft` keeps its own `contentType` and text snapshot; `Approval` keeps its own `contentTitle`/`contentType` snapshot for search and display).
-- **Reaching into another module's repository, not its service, for a narrow need**: `ApprovalServiceImpl` injects `DraftRepository` directly (to read/update a draft's status) rather than going through `DraftService`, specifically to avoid inheriting Module 4's own audit/notification side effects on top of Module 5's own. The same reasoning applies in reverse to `UserRepository` (injected to look up active admins to notify on submission) — a repository is a safe, narrow, read/write dependency; a service carries its whole module's cross-cutting behavior with it.
+- **Storage**: the MinIO container and client dependency, provisioned in Module 0, are used as-is by Module 2's `StorageService` — and, in turn, by Module 6's `InstagramServiceImpl` (`storageService.presignedGetUrl(...)` to hand the Graph API a browser-reachable image URL for the media container it creates).
+- **Navigation**: every future page already has a placeholder route and a `lucide-react` icon registered in `frontend/src/lib/nav-config.ts` — building a module means replacing the placeholder page and flipping its `status` to `"available"`, not adding new routing/shell code. Instagram made this exact flip for Module 6.
+- **Cross-module references without hard coupling**: Module 4's `ContentDraft.generatedContentId`/`mediaId`, Module 5's `Approval.contentId`, and Module 6's `InstagramPost.approvalId`/`instagramAccountId`/`mediaId` all follow the same pattern Module 3 established for `GeneratedContent.mediaId` — a plain nullable UUID column with `ON DELETE SET NULL`, not a JPA `@ManyToOne`. Deleting a `Media`/`GeneratedContent`/`ContentDraft`/`Approval` row never fails or cascades unexpectedly; dependents just lose the back-reference and keep their own denormalized copy of whatever they needed to display (`ContentDraft` keeps its own `contentType` and text snapshot; `Approval` keeps its own `contentTitle`/`contentType` snapshot; `InstagramPost` keeps its own `caption`/`hashtags` rather than re-reading them from the approval at display time).
+- **Reaching into another module's repository, not its service, for a narrow need**: `ApprovalServiceImpl` injects `DraftRepository` directly (to read/update a draft's status) rather than going through `DraftService`, specifically to avoid inheriting Module 4's own audit/notification side effects on top of Module 5's own. `InstagramServiceImpl` does the same with `ApprovalRepository` (read-only — checking `Approval.status`/`contentTitle`) and `MediaRepository` (read-only — resolving the selected media row), while still going through the real `StorageService` *service* (not a raw MinIO repository) since presigned-URL generation is genuine business logic, not a plain CRUD read. The same reasoning applies in reverse to `UserRepository` (injected by Module 5 to look up active admins to notify on submission) — a repository is a safe, narrow, read/write dependency; a service carries its whole module's cross-cutting behavior with it.
+- **Strategy-pattern provider modules follow one shape**: Module 6's `provider/` package (`InstagramPublisher` interface, `MetaGraphPublisher` real impl, `MockInstagramPublisher` `@Profile("dev")` impl, `PublisherResolver` name-based resolver bean) is structurally identical to Module 3's `modules/ai/provider/` (`AIProvider`, `OpenAICompatibleProvider`, `MockAIProvider`, `AIProviderResolver`) — the same shape was reused rather than redesigned, down to both mocks supporting a `SIMULATE_FAILURE` caption/prompt marker for exercising the failure path in `dev`.

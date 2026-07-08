@@ -34,8 +34,9 @@ This project ships module-by-module; see the build plan for the full roadmap. Sh
 - **Module 3 — AI Content Generation**: provider-agnostic `AIProvider` interface (OpenAI-compatible implementation today, swappable via config), DB-backed versioned `PromptTemplate`s seeded for all 17 content types, `{{placeholder}}` resolution against uploaded media and free-text context, generate/regenerate/edit/delete endpoints with rate limiting, audit logging and in-app notifications on completion/failure, and a Next.js generation UI (content-type picker, streaming-style loading state, preview/copy/edit/regenerate/delete).
 - **Module 4 — Content Draft Management**: a curation/review layer on top of Module 3's raw generated content — `ContentDraft` entities with a `DRAFT → READY_FOR_REVIEW → APPROVED/REJECTED → PUBLISHED/ARCHIVED` lifecycle, save/edit/duplicate/soft-delete/restore/finalize endpoints, dynamic search+filter+pagination via JPA Specifications, audit logging and in-app notifications, and a Next.js Draft Management page (card/list views, status chips, search/filter, preview/edit drawers, trash + restore).
 - **Module 5 — Approval Workflow**: a review cycle on top of Module 4's drafts — `Approval`/`ApprovalHistory`/`ApprovalComment` entities (`PENDING_APPROVAL → APPROVED/REJECTED → READY_FOR_PUBLISH`), submit/approve/reject/comment endpoints with a DB-enforced one-pending-approval-per-draft rule, full audit trail and admin notifications on every action, and a Next.js Approval Dashboard (pending/approved/rejected tabs, search, date range) plus a detail page (history timeline, comments panel, view-draft/approve/reject actions).
+- **Module 6 — Instagram Publisher**: connect an Instagram Business Account and publish `READY_FOR_PUBLISH` approvals to it. A Strategy-pattern `InstagramPublisher` interface swaps between the real Meta Graph API (two-step container-then-publish flow) and a `dev`-only `MockInstagramPublisher` purely by configuration (`app.instagram.active-publisher`) — no production code depends on which one is active. Access tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Full connect/publish/mock-publish/history/disconnect API, append-only publish history, audit trail and notifications (started/success/failure) on every attempt, and a Next.js Instagram Dashboard (connection panel, publishing queue, publish dialog with live preview, history feed). See `docs/INSTAGRAM_PUBLISHER.md` for the full design.
 
-Everything else (Instagram/website publishing, scheduler, analytics, activity log viewer, notification center, settings UI) ships in later modules.
+Everything else (website publishing, scheduler, analytics, activity log viewer, notification center, settings UI) ships in later modules.
 
 ### First login (fresh database)
 
@@ -53,7 +54,7 @@ Set `ADMIN_BOOTSTRAP_EMAIL` and `ADMIN_BOOTSTRAP_PASSWORD` in `.env` before the 
 
 ```bash
 cp .env.example .env
-# edit .env: set POSTGRES_PASSWORD, STORAGE_SECRET_KEY, JWT_SECRET, AI_PROVIDER_API_KEY, etc.
+# edit .env: set POSTGRES_PASSWORD, STORAGE_SECRET_KEY, JWT_SECRET, APP_ENCRYPTION_KEY, AI_PROVIDER_API_KEY, etc.
 
 docker compose --env-file .env -f infra/docker-compose.yml up -d --build
 ```

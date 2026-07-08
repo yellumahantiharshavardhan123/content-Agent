@@ -1,6 +1,9 @@
 app:
   jwt:
     secret: test-secret-that-is-at-least-32-characters-long-for-hmac-sha
+  security:
+    # 32 zero bytes, base64-encoded - fine for tests, never used for anything real.
+    encryption-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
   cookie:
     secure: false
   cors:

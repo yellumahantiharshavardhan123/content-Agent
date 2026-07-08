@@ -1,6 +1,6 @@
 # System Architecture Diagrams — Arjun Sports AI Content Agent
 
-All diagrams below reflect Module 0 + Module 1 as implemented. Where a component is provisioned but not yet functionally wired up (MinIO), the diagram says so explicitly.
+All diagrams below reflect Modules 0 through 6 as implemented. Where a component is provisioned but not yet functionally wired up, the diagram says so explicitly.
 
 ---
 
@@ -150,6 +150,57 @@ Browser                    Backend                              PostgreSQL
 
 **Explanation:** logout only revokes the **single** refresh token presented in the request — other active sessions (e.g. a different browser) are left alone. Only a password change or reset revokes every session at once. The access token itself is never individually invalidated server-side (it is stateless); logout relies on the cookie being cleared client-side and the token's own short (15-minute) expiry to close the window.
 
+## 6a. Instagram Publish Sequence (Module 6)
+
+```
+Browser                Backend (InstagramServiceImpl)         Meta Graph API / Mock       PostgreSQL
+   │                          │                                       │                        │
+   │ POST /api/instagram/publish                                       │                        │
+   ├─────────────────────────▶│                                       │                        │
+   │                          │  load active InstagramAccount          │                        │
+   │                          │  load Approval, validate READY_FOR_PUBLISH                       │
+   │                          │  load Media                             │                        │
+   │                          │  existsByApprovalIdAndStatus(FAILED)   │                        │
+   │                          │  existsByApprovalIdAndStatus(PUBLISHED)│                        │
+   │                          ├────────────────────────────────────────────────────────────────▶│
+   │                          │◀────────────────────────────────────────────────────────────────┤
+   │                          │  publishTransactionHelper.notifyStarted(...)                     │
+   │                          │  [own REQUIRES_NEW transaction - commits now, ]                  │
+   │                          │  [survives even if the publish call below fails]                 │
+   │                          ├────────────────────────────────────────────────────────────────▶│
+   │                          │  storageService.presignedGetUrl(media)  │                        │
+   │                          │  credentialEncryptionUtil.decrypt(token)│                        │
+   │                          │  publisher.publish(imageUrl, caption, token)                     │
+   │                          ├──────────────────────────────────────▶│                        │
+   │                          │                                       │  create media container │
+   │                          │                                       │  (POST /{id}/media)      │
+   │                          │                                       │  publish it               │
+   │                          │                                       │  (POST /{id}/media_publish)│
+   │                          │◀──────────────────────────────────────┤                        │
+   │                          │                                       │                        │
+   │                    ┌─────┴─────┐                                                            │
+   │                    │  success?  │                                                            │
+   │                    └─────┬─────┘                                                            │
+   │                     yes  │  no                                                              │
+   │                          │   └──▶ publishTransactionHelper.recordFailure(...)                │
+   │                          │        [own REQUIRES_NEW transaction: FAILED InstagramPost row,   │
+   │                          │         PUBLISH_FAILURE history, audit log, notification -        │
+   │                          │         all survive the re-thrown exception below]                │
+   │                          │        ├─────────────────────────────────────────────────────────▶│
+   │                          │        throw InstagramPublisherException  (mapped to 401/422/     │
+   │                          │                                             429/503/504)          │
+   │                          ▼                                                                    │
+   │                    INSERT InstagramPost (status=PUBLISHED)                                    │
+   │                    INSERT instagram_publish_history (PUBLISH_SUCCESS)                         │
+   │                    INSERT activity_log (PUBLISH or RETRY)                                     │
+   │                    INSERT notifications (PUBLISH_SUCCESS)                                     │
+   │                          ├────────────────────────────────────────────────────────────────▶│
+   │  200 OK / error status   │                                       │                        │
+   │◀─────────────────────────┤                                       │                        │
+```
+
+**Explanation:** `doPublish()` deliberately builds nothing in the database until *after* the publisher call resolves — the `InstagramPost` row for a successful attempt is only ever inserted with its final `PUBLISHED` state, never inserted-then-updated. The `PUBLISH_STARTED` notification is the one exception: it must exist even when the attempt fails, so it fires through `PublishTransactionHelper.notifyStarted()` (its own `REQUIRES_NEW` transaction) *before* the publisher call, not through the outer `@Transactional` method — see `ARCHITECTURE.md` §6's `REQUIRES_NEW` row and `INSTAGRAM_PUBLISHER.md`'s Bugs Found section for why this exists (it was a real bug caught during manual verification, not a hypothetical). On failure, `PublishTransactionHelper.recordFailure()` independently commits the `FAILED` post row, history entry, audit log, and failure notification in its own transaction, then the original exception is re-thrown and rolls back only the (empty, so far) outer transaction — the same pattern `GenerationFailureRecorder` established in Module 3.
+
 ## 7. Request Lifecycle (every API call)
 
 ```
@@ -245,7 +296,7 @@ Incoming HTTP request
 
 **Explanation:** `common` has no dependency on any feature module — it is the shared foundation. `modules/auth` depends on `modules/user` (it authenticates and issues tokens *for* a `User`), never the other way around. `modules/settings` is a standalone scaffold with no other module depending on it yet. This ordering is why Module 1 could safely reuse `AuditLogService`/`NotificationService` without editing them — a new module can depend "downward" on `common` and, if needed, on `modules/user`, without the reverse ever being true.
 
-### Modules 2–5 extension
+### Modules 2–6 extension
 
 ```
               ┌────────────────────┐
@@ -259,42 +310,57 @@ Incoming HTTP request
 │ (StorageService,  │◀────────────────│ (Media, MediaService,│
 │  MinioConfig,     │  uses           │  MediaController)     │
 │  MinioStorageImpl)│                 └──────────┬───────────┘
-└────────────────┘                              │ mediaId (plain UUID,
-                                                  │ no @ManyToOne)
-                                                  ▼
-                                     ┌────────────────────┐
-                                     │    modules/ai/        │
-                                     │ (PromptTemplate,       │
-                                     │  GeneratedContent,     │
-                                     │  AIProvider + impls)  │
-                                     └──────────┬───────────┘
-                                                  │ generatedContentId
-                                                  │ (plain UUID, no @ManyToOne)
-                                                  ▼
-                                     ┌────────────────────┐
-                                     │   modules/draft/       │
-                                     │ (ContentDraft,         │
-                                     │  DraftService,         │
-                                     │  DraftController)      │
-                                     └──────────┬───────────┘
-                                                  │ contentId
-                                                  │ (plain UUID, no @ManyToOne)
-                                                  ▼
-                                     ┌────────────────────┐
-                                     │  modules/approval/     │
-                                     │ (Approval,             │
-                                     │  ApprovalService,      │
-                                     │  ApprovalController)   │
-                                     └────────────────────┘
-                          ▲
-                          │ read-only: findByRoleAndActiveTrue
-                          │ (to notify admins on submit)
-                    ┌────────────┐
-                    │modules/user/ │
-                    └────────────┘
+└───────┬────────┘                              │ mediaId (plain UUID,
+        │ uses (presignedGetUrl for the          │ no @ManyToOne)
+        │ Graph API's image_url param)            ▼
+        │                                ┌────────────────────┐
+        │                                │    modules/ai/        │
+        │                                │ (PromptTemplate,       │
+        │                                │  GeneratedContent,     │
+        │                                │  AIProvider + impls)  │
+        │                                └──────────┬───────────┘
+        │                                            │ generatedContentId
+        │                                            │ (plain UUID, no @ManyToOne)
+        │                                            ▼
+        │                                ┌────────────────────┐
+        │                                │   modules/draft/       │
+        │                                │ (ContentDraft,         │
+        │                                │  DraftService,         │
+        │                                │  DraftController)      │
+        │                                └──────────┬───────────┘
+        │                                            │ contentId
+        │                                            │ (plain UUID, no @ManyToOne)
+        │                                            ▼
+        │                                ┌────────────────────┐
+        │                                │  modules/approval/     │
+        │                                │ (Approval,             │
+        │                                │  ApprovalService,      │
+        │                                │  ApprovalController)   │
+        │                                └──────────┬───────────┘
+        │                                            │ approvalId
+        │                                            │ (plain UUID, no @ManyToOne)
+        │                                            ▼
+        │                                ┌────────────────────┐
+        └───────────────────────────────▶│  modules/instagram/    │
+                                          │ (InstagramAccount,     │
+                                          │  InstagramPost,        │
+                                          │  InstagramPublisher    │
+                                          │  + MetaGraphPublisher/  │
+                                          │    MockInstagramPublisher,│
+                                          │  InstagramService,      │
+                                          │  InstagramController)  │
+                                          └────────────────────┘
+                          ▲                          ▲
+                          │ read-only:               │ read-only: findById
+                          │ findByRoleAndActiveTrue   │ (Approval status/title,
+                          │ (to notify admins         │  Media for the image URL)
+                          │  on submit)               │
+                    ┌────────────┐                    │
+                    │modules/user/ │◀───────────────────┘ (also reads
+                    └────────────┘                        ApprovalRepository/MediaRepository)
 ```
 
-**Explanation:** `modules/media` depends on `storage` (it needs somewhere to put files); `modules/ai` optionally references a `Media` row by id for generation context; `modules/draft` is created from a `modules/ai` `GeneratedContent` row; `modules/approval` is created from a `modules/draft` `ContentDraft` row. Critically, none of these are JPA `@ManyToOne` relationships — each dependency is a plain, nullable, indexed UUID column with `ON DELETE SET NULL` at the database level (see `DATABASE_DESIGN.md` §3–4). This means `modules/draft` never actually imports an entity class from `modules/ai`, `modules/ai` never imports one from `modules/media`, and `modules/approval` never imports `ContentDraft` — the coupling is by convention (an id that happens to reference another table) rather than by compile-time dependency, so any of these modules could theoretically be deleted without a compilation error in the others. Only the *service* layer optionally does a live lookup (e.g. `DraftServiceImpl` calls `GeneratedContentRepository.findById(...)` when creating a draft; `ApprovalServiceImpl` calls `DraftRepository.findById(...)`/`.save(...)` directly, not `DraftService`, specifically to update the draft's status without triggering Module 4's own audit/notification side effects on top of Module 5's) — that is a real Java-level dependency, but it is one-directional and matches the "depend downward only" rule Module 1 established. `modules/approval` is also the first module since `modules/auth` to depend on `modules/user` (read-only, via `UserRepository.findByRoleAndActiveTrue`, to notify every active admin when something is submitted for review).
+**Explanation:** `modules/media` depends on `storage` (it needs somewhere to put files); `modules/ai` optionally references a `Media` row by id for generation context; `modules/draft` is created from a `modules/ai` `GeneratedContent` row; `modules/approval` is created from a `modules/draft` `ContentDraft` row; `modules/instagram` publishes an `approvals` row that is `READY_FOR_PUBLISH`. Critically, none of these are JPA `@ManyToOne` relationships — each dependency is a plain, nullable, indexed UUID column with `ON DELETE SET NULL` at the database level (see `DATABASE_DESIGN.md` §3–4). This means `modules/draft` never actually imports an entity class from `modules/ai`, `modules/ai` never imports one from `modules/media`, and `modules/approval`/`modules/instagram` never import `ContentDraft`/`Approval` entity internals beyond what their own repositories return — the coupling is by convention (an id that happens to reference another table) rather than by compile-time dependency, so any of these modules could theoretically be deleted without a compilation error in the others. Only the *service* layer optionally does a live lookup (e.g. `DraftServiceImpl` calls `GeneratedContentRepository.findById(...)` when creating a draft; `ApprovalServiceImpl` calls `DraftRepository.findById(...)`/`.save(...)` directly, not `DraftService`; `InstagramServiceImpl` calls `ApprovalRepository.findById(...)` and `MediaRepository.findByIdAndDeletedFalse(...)` directly, not `ApprovalService`/`MediaService` — all three specifically to read/update state in another module without triggering that module's own audit/notification side effects on top of the caller's) — that is a real Java-level dependency, but it is one-directional and matches the "depend downward only" rule Module 1 established. `modules/approval` and `modules/instagram` are the only modules since `modules/auth` to depend on `modules/user` (both read-only, via `UserRepository.findByRoleAndActiveTrue`/actor lookups). `modules/instagram` is also the first feature module to depend on `storage` *directly* rather than through `modules/media` — it calls `StorageService.presignedGetUrl(...)` itself to hand the Graph API a browser-reachable image URL, since that is genuine cross-cutting infrastructure, not something `modules/media` needs to broker.
 
 ## 9. Deployment Architecture
 

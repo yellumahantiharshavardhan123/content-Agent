@@ -1,7 +1,7 @@
 # API Documentation — Arjun Sports AI Content Agent
 
 **Base URL (local):** `http://localhost:8080/api`
-**Scope:** only endpoints that exist in the codebase today (Module 0 health check, Module 1 auth/user, Module 2 media, Module 3 AI generation/prompts, Module 4 content drafts, Module 5 approval workflow). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
+**Scope:** only endpoints that exist in the codebase today (Module 0 health check, Module 1 auth/user, Module 2 media, Module 3 AI generation/prompts, Module 4 content drafts, Module 5 approval workflow, Module 6 Instagram publisher). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
 
 ## Response Envelope
 
@@ -44,14 +44,15 @@ List endpoints wrap a `PageResponse<T>` inside `data`:
 | 200 | Success | Normal responses |
 | 201 | Created | `POST /api/users` |
 | 400 | Bad request / validation failure | `GlobalExceptionHandler` (Bean Validation, `BadRequestException`) |
-| 401 | Unauthorized | Missing/invalid/expired token, wrong credentials, `UnauthorizedException`, Spring Security's `RestAuthenticationEntryPoint` |
+| 401 | Unauthorized | Missing/invalid/expired token, wrong credentials, `UnauthorizedException`, Spring Security's `RestAuthenticationEntryPoint`, or `InstagramPublisherException` — `INVALID_CREDENTIALS` (Meta rejected the access token) |
 | 403 | Forbidden | Authenticated but wrong role — `RestAccessDeniedHandler` |
 | 404 | Not found | `ResourceNotFoundException` |
-| 409 | Conflict | `ConflictException` (e.g. duplicate email, duplicate final draft) |
+| 409 | Conflict | `ConflictException` (e.g. duplicate email, duplicate final draft, already-connected Instagram account, already-published content) |
 | 413 | Payload too large | Uploaded file exceeds the type's max size |
-| 429 | Too many requests | Login or AI generation rate limiter exceeded |
+| 422 | Unprocessable entity | `InstagramPublisherException` — `INVALID_MEDIA` (Meta rejected the image itself) |
+| 429 | Too many requests | Login or AI generation rate limiter exceeded, or `InstagramPublisherException` — `RATE_LIMITED` |
 | 500 | Internal server error | Any uncaught exception (`GlobalExceptionHandler` fallback) |
-| 502/503/504 | AI provider error | `AIProviderException` — `INVALID_RESPONSE`/`UNKNOWN` → 502, `UNAVAILABLE` → 503, `TIMEOUT` → 504, `RATE_LIMITED` → 429 |
+| 502/503/504 | AI provider / Instagram publisher error | `AIProviderException` — `INVALID_RESPONSE`/`UNKNOWN` → 502, `UNAVAILABLE` → 503, `TIMEOUT` → 504; `InstagramPublisherException` — `UNAVAILABLE`/`UNKNOWN` → 503, `TIMEOUT` → 504 |
 
 ## Error Response Shape
 
@@ -459,3 +460,122 @@ Paginated, newest-first `ApprovalHistory` timeline for one draft — every submi
 ### `GET /api/approval/{id}`
 
 Single approval, including its full comment thread. Works regardless of the approval's status.
+
+---
+
+## Instagram Publisher APIs (ADMIN only)
+
+Publishes `approvals` (Module 5) at `READY_FOR_PUBLISH` to a connected Instagram Business Account, via either the real Meta Graph API or a `dev`-only mock — see `INSTAGRAM_PUBLISHER.md` for the full design and how the two are switched purely by configuration. All endpoints under `/api/instagram/**` require the `ADMIN` role.
+
+### `POST /api/instagram/connect`
+
+Connects an Instagram Business Account. Verifies the credentials against the active publisher (a real Graph API call, or an instant mock success in `dev`), then stores the account with the access token **encrypted at rest** (AES-256-GCM). The raw token is never persisted in plaintext and never appears in any response.
+
+**Request:**
+```json
+{
+  "businessAccountId": "17841400000000000",
+  "facebookPageId": "123456789",
+  "accessToken": "EAAG..."
+}
+```
+
+Validation: `businessAccountId` required; `accessToken` required; `facebookPageId` optional.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "message": "Instagram account connected",
+  "data": {
+    "id": "b24a1c60-...",
+    "connected": true,
+    "businessAccountId": "17841400000000000",
+    "facebookPageId": "123456789",
+    "username": "arjunsportsacademy",
+    "connectedAt": "2026-07-08T17:50:53.237Z",
+    "disconnectedAt": null
+  },
+  "timestamp": "..."
+}
+```
+
+**Errors:** `409` if an account is already connected (disconnect it first — only one active connection at a time); `401` if Meta rejects the credentials (real publisher only); `503`/`504` if Meta is unreachable or times out.
+
+### `GET /api/instagram/status`
+
+Returns the currently-connected account, or a `connected: false` placeholder if none is connected. Never returns the access token.
+
+**Response `200`** (not connected):
+```json
+{
+  "success": true,
+  "data": {
+    "id": null,
+    "connected": false,
+    "businessAccountId": null,
+    "facebookPageId": null,
+    "username": null,
+    "connectedAt": null,
+    "disconnectedAt": null
+  },
+  "timestamp": "..."
+}
+```
+
+### `POST /api/instagram/publish`
+
+Publishes to Instagram using the **configured active publisher** (`app.instagram.active-publisher` — the real Meta Graph API in production, `mock` in `dev` unless overridden). This is the endpoint the Publishing Queue's "Publish" button calls.
+
+**Request:**
+```json
+{
+  "approvalId": "8619c7bc-...",
+  "mediaId": "5aacbfcf-...",
+  "caption": "Our shooters brought home gold this weekend!",
+  "hashtags": "#shooting #academy #champions"
+}
+```
+
+Validation: `approvalId` required; `mediaId` required; `caption` required, non-blank; `hashtags` optional.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "message": "Published to Instagram",
+  "data": {
+    "id": "a02fdc39-...",
+    "approvalId": "8619c7bc-...",
+    "instagramAccountId": "b24a1c60-...",
+    "mediaId": "5aacbfcf-...",
+    "caption": "Our shooters brought home gold this weekend!",
+    "hashtags": "#shooting #academy #champions",
+    "status": "PUBLISHED",
+    "instagramMediaId": "17900000000000000",
+    "permalink": "https://www.instagram.com/p/Cxxxxxxxxxx/",
+    "publisherName": "meta-graph-api",
+    "errorMessage": null,
+    "publishedAt": "...",
+    "createdAt": "...",
+    "createdBy": "5355ee95-..."
+  },
+  "timestamp": "..."
+}
+```
+
+**Errors:** `404` unknown `approvalId` or `mediaId`; `400` the approval is not currently `READY_FOR_PUBLISH`; `409` no Instagram account is connected, or this approval has already been published; `401`/`422`/`429`/`503`/`504` publisher errors (see Status Codes above) — on any publisher error, a `FAILED` post row and history entry are still persisted (see `INSTAGRAM_PUBLISHER.md`) so the attempt can be retried.
+
+### `POST /api/instagram/publish/mock`
+
+Identical request/response contract to `POST /api/instagram/publish`, but **always** uses the mock publisher regardless of `app.instagram.active-publisher` — lets an admin preview the full publish flow (including the failure path, via a `SIMULATE_FAILURE` marker in the caption) without touching the real Graph API, even when a real account is connected in production-like configurations. Returns `409` ("Mock publisher is not available outside the dev profile") if no mock bean is registered, i.e. outside the `dev` profile.
+
+### `GET /api/instagram/history`
+
+Paginated, newest-first feed of every connect/disconnect/publish attempt (success or failure) ever recorded — global, not scoped to one post. Query params: `page`, `size`, `sort`.
+
+**Response `200`:** `data` is a `PageResponse<InstagramHistoryResponse>` — each entry has `id`, `instagramPostId` (nullable — null for `CONNECT`/`DISCONNECT`), `action` (`CONNECT`/`DISCONNECT`/`PUBLISH_ATTEMPT`/`PUBLISH_SUCCESS`/`PUBLISH_FAILURE`/`RETRY`), `status`, `publisherName`, `errorMessage`, `actorEmail`, `createdAt`.
+
+### `DELETE /api/instagram/disconnect`
+
+Deactivates the currently-connected account (`is_active = false`, `disconnectedAt` set) — the row is kept, not deleted, so its publish history remains attributable. **Errors:** `400` if no account is currently connected.

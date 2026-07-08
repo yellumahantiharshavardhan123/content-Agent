@@ -12,6 +12,12 @@ app:
     # Still overridable: set AI_ACTIVE_PROVIDER=openai to test against a real key
     # while on this profile.
     active-provider: ${AI_ACTIVE_PROVIDER:mock}
+  instagram:
+    # No real Meta credentials required for local dev/testing - MockInstagramPublisher
+    # (only ever registered under this profile, see its class Javadoc) stands in by
+    # default. Still overridable: set IG_ACTIVE_PUBLISHER=meta-graph-api to test
+    # against a real Meta app while on this profile.
+    active-publisher: ${IG_ACTIVE_PUBLISHER:mock}
 
 logging:
   level:

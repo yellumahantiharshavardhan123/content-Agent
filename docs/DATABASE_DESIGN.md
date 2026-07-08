@@ -2,7 +2,7 @@
 
 **Engine:** PostgreSQL 16. **Schema ownership:** Flyway migrations only (`spring.jpa.hibernate.ddl-auto: validate` — Hibernate never generates or alters DDL, it only verifies entity mappings match what Flyway created). **Primary keys:** every table uses a `UUID` generated application-side by Hibernate (`@UuidGenerator`), so no table relies on a database-side default or the `pgcrypto`/`uuid-ossp` extensions.
 
-This document covers exactly the six tables that exist after migrations `V1` and `V2`. No table described here is speculative.
+This document covers exactly the eleven tables that exist after migrations `V1` through `V6`. No table described here is speculative.
 
 ---
 
@@ -72,6 +72,86 @@ This document covers exactly the six tables that exist after migrations `V1` and
 
 **Why `activity_log` and `notifications` have no foreign keys to `users`:** both are intentionally denormalized. `activity_log.actor_id`/`actor_email` and `notifications.recipient_id` store the user identifier and (for the log) email *as they were at the time of the event*, so the audit trail and notification history remain meaningful even if a user is later deleted — a hard FK with `ON DELETE CASCADE` would silently erase history, and `ON DELETE SET NULL` would lose the actor's identity. This is a deliberate design choice, not an oversight.
 
+### Modules 2–4 additions (`V3`–`V6`)
+
+```
+┌───────────────────────────┐
+│          media              │
+├───────────────────────────┤
+│ PK id               UUID   │
+│    file_name        VARCHAR│
+│    storage_key UNIQUE VARCHAR│
+│    content_type     VARCHAR│
+│    media_type       VARCHAR│
+│    file_size_bytes   BIGINT│
+│    description      VARCHAR│
+│    is_deleted       BOOLEAN│
+│    created_at   TIMESTAMPTZ│
+│    updated_at   TIMESTAMPTZ│
+│    created_by       UUID   │
+│    updated_by       UUID   │
+└─────────────┬─────────────┘
+              │ 0..1 (ON DELETE SET NULL, plain UUID column - no @ManyToOne)
+              ▼
+┌───────────────────────────┐        ┌───────────────────────────┐
+│    prompt_templates         │        │      generated_content       │
+├───────────────────────────┤        ├───────────────────────────┤
+│ PK id               UUID   │        │ PK id               UUID   │
+│    content_type     VARCHAR│◄───────┤ FK media_id ────────UUID   │
+│    name             VARCHAR│  0..1   │ FK content_type     VARCHAR│
+│    description      VARCHAR│ (by     │ FK prompt_template_id UUID │──┐
+│    system_prompt        TEXT│  value, │    prompt_used          TEXT│  │ ON DELETE
+│    user_prompt_template  TEXT│  not FK)│    generated_text       TEXT│  │ SET NULL
+│    version          INTEGER│         │    ai_model          VARCHAR│  │
+│    is_active        BOOLEAN│         │    status            VARCHAR│  │
+│    created_at   TIMESTAMPTZ│         │    error_message         TEXT│  │
+│    updated_at   TIMESTAMPTZ│         │    is_draft          BOOLEAN│  │
+│    created_by       UUID   │         │    is_edited         BOOLEAN│  │
+│    updated_by       UUID   │         │    created_at   TIMESTAMPTZ│  │
+└─────────────┬─────────────┘         │    updated_at   TIMESTAMPTZ│  │
+   0..N (unique partial index:        │    created_by       UUID   │  │
+   one is_active=TRUE row per         │    updated_by       UUID   │  │
+   content_type)                      └──────────┬──────────────┘  │
+                                                   │ 0..N              │
+                          ┌────────────────────────┘ (ON DELETE        │
+                          ▼                          SET NULL)         │
+              ┌───────────────────────────┐                            │
+              │     generation_history       │◄───────────────────────┘
+              ├───────────────────────────┤   (prompt_template_id, no FK constraint -
+              │ PK id               UUID   │    plain denormalized column)
+              │ FK generated_content_id UUID│
+              │    media_id          UUID   │  (immutable append-only log - no
+              │    content_type      VARCHAR│   updated_at/updated_by; a FAILED row
+              │    prompt_template_id UUID  │   must outlive the transaction that
+              │    action            VARCHAR│   created it, see ARCHITECTURE.md §6)
+              │    ai_model          VARCHAR│
+              │    status            VARCHAR│
+              │    error_message         TEXT│
+              │    latency_ms        INTEGER│
+              │    actor_id          UUID   │
+              │    actor_email       VARCHAR│
+              │    created_at   TIMESTAMPTZ│
+              └───────────────────────────┘
+
+┌───────────────────────────┐
+│      content_drafts          │
+├───────────────────────────┤
+│ PK id               UUID   │
+│ FK generated_content_id UUID│──── ON DELETE SET NULL → generated_content(id)
+│ FK media_id          UUID   │──── ON DELETE SET NULL → media(id)
+│    content_type     VARCHAR│
+│    title            VARCHAR│
+│    content_text          TEXT│  (own copy - independently editable from the
+│    status            VARCHAR│   source generated_content's text from this
+│    is_deleted        BOOLEAN│   point on; see ARCHITECTURE.md §15)
+│    deleted_at   TIMESTAMPTZ│
+│    created_at   TIMESTAMPTZ│
+│    updated_at   TIMESTAMPTZ│
+│    created_by       UUID   │
+│    updated_by       UUID   │
+└───────────────────────────┘
+```
+
 ## 2. Tables
 
 ### `users` (Module 1)
@@ -137,7 +217,7 @@ No `updated_at`/`updated_by`: audit entries are immutable once written, so updat
 |---|---|---|
 | `id` | UUID | PRIMARY KEY |
 | `recipient_id` | UUID | nullable (null = broadcast to all admins) |
-| `type` | VARCHAR(40) | NOT NULL — enum `NotificationType`: `LOGIN_SUCCESS`, `PASSWORD_CHANGED`, `GENERATION_COMPLETED`, `APPROVAL_REQUIRED`, `APPROVED`, `REJECTED`, `PUBLISH_SUCCESS`, `PUBLISH_FAILURE`, `SCHEDULE_COMPLETED`, `SCHEDULE_FAILED`, `SYSTEM` |
+| `type` | VARCHAR(40) | NOT NULL — enum `NotificationType`: `LOGIN_SUCCESS`, `PASSWORD_CHANGED`, `GENERATION_COMPLETED`, `GENERATION_FAILED`, `DRAFT_SAVED`, `DRAFT_UPDATED`, `DRAFT_DELETED`, `DRAFT_RESTORED`, `APPROVAL_REQUIRED`, `APPROVED`, `REJECTED`, `PUBLISH_SUCCESS`, `PUBLISH_FAILURE`, `SCHEDULE_COMPLETED`, `SCHEDULE_FAILED`, `SYSTEM` |
 | `title` | VARCHAR(255) | NOT NULL |
 | `message` | TEXT | NOT NULL |
 | `link` | VARCHAR(500) | nullable (deep link for a future notification-center UI) |
@@ -145,7 +225,7 @@ No `updated_at`/`updated_by`: audit entries are immutable once written, so updat
 | `read_at` | TIMESTAMPTZ | nullable |
 | `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
 
-Only `LOGIN_SUCCESS` and `PASSWORD_CHANGED` are actually written today (by Module 1). The other enum values are reserved for later modules.
+`LOGIN_SUCCESS`/`PASSWORD_CHANGED` (Module 1), `GENERATION_COMPLETED`/`GENERATION_FAILED` (Module 3), and `DRAFT_SAVED`/`DRAFT_UPDATED`/`DRAFT_DELETED`/`DRAFT_RESTORED` (Module 4) are written today. `APPROVAL_REQUIRED` onward are reserved for later modules.
 
 ### `app_settings` (Module 0 scaffold — no service/controller yet)
 
@@ -161,6 +241,90 @@ Only `LOGIN_SUCCESS` and `PASSWORD_CHANGED` are actually written today (by Modul
 
 This table has no rows written by any current code path — it exists so a future Application Settings module can build its CRUD layer directly on top of an already-migrated schema.
 
+### `media` (Module 2)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `file_name` | VARCHAR(255) | NOT NULL |
+| `storage_key` | VARCHAR(500) | NOT NULL, UNIQUE (the MinIO object key) |
+| `content_type` | VARCHAR(100) | NOT NULL (validated against a per-`media_type` allow-list at the application layer) |
+| `media_type` | VARCHAR(20) | NOT NULL — enum `MediaType`: `IMAGE`, `VIDEO`, `PDF`, `TEXT_NOTE` |
+| `file_size_bytes` | BIGINT | NOT NULL (validated against a per-`media_type` max at the application layer: 10MB/200MB/20MB/2MB) |
+| `description` | VARCHAR(1000) | nullable |
+| `is_deleted` | BOOLEAN | NOT NULL, DEFAULT `FALSE` (soft delete — the MinIO object is not removed) |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+### `prompt_templates` (Module 3)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `content_type` | VARCHAR(40) | NOT NULL — enum `ContentType`, one of the 17 supported content types |
+| `name` | VARCHAR(200) | NOT NULL |
+| `description` | VARCHAR(500) | nullable |
+| `system_prompt` | TEXT | NOT NULL — supports `{{academyName}}` |
+| `user_prompt_template` | TEXT | NOT NULL — supports `{{academyName}}`, `{{mediaFileName}}`, `{{mediaDescription}}`, `{{manualNotes}}`, `{{eventDetails}}`, `{{achievement}}`, `{{competitionResults}}`, `{{trainingSession}}`, `{{coachNotes}}` |
+| `version` | INTEGER | NOT NULL |
+| `is_active` | BOOLEAN | NOT NULL, DEFAULT `TRUE` |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+Rows are immutable once written — "editing" a template via `PUT /api/prompts/{id}` deactivates the current row and inserts a new one at `version + 1`, so every past version stays queryable by `content_type` history.
+
+### `generated_content` (Module 3)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `media_id` | UUID | nullable, FK → `media(id)` **ON DELETE SET NULL** |
+| `content_type` | VARCHAR(40) | NOT NULL |
+| `prompt_template_id` | UUID | nullable, FK → `prompt_templates(id)` **ON DELETE SET NULL** |
+| `prompt_used` | TEXT | NOT NULL (the fully-resolved user prompt actually sent to the AI provider) |
+| `generated_text` | TEXT | nullable (null when `status = FAILED`) |
+| `ai_model` | VARCHAR(100) | nullable |
+| `status` | VARCHAR(20) | NOT NULL — enum `GenerationStatus`: `SUCCESS`, `FAILED` |
+| `error_message` | TEXT | nullable |
+| `is_draft` | BOOLEAN | NOT NULL, DEFAULT `TRUE` (Module 3's own lightweight draft/final toggle — distinct from Module 4's `content_drafts` workflow, see `ARCHITECTURE.md` §15) |
+| `is_edited` | BOOLEAN | NOT NULL, DEFAULT `FALSE` |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+### `generation_history` (Module 3)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `generated_content_id` | UUID | nullable, FK → `generated_content(id)` **ON DELETE SET NULL** |
+| `media_id` | UUID | nullable (denormalized, no FK) |
+| `content_type` | VARCHAR(40) | NOT NULL (denormalized, no FK) |
+| `prompt_template_id` | UUID | nullable (denormalized, no FK) |
+| `action` | VARCHAR(20) | NOT NULL — enum `GenerationAction`: `GENERATE`, `REGENERATE` |
+| `ai_model` | VARCHAR(100) | nullable |
+| `status` | VARCHAR(20) | NOT NULL |
+| `error_message` | TEXT | nullable |
+| `latency_ms` | INTEGER | nullable |
+| `actor_id` | UUID | nullable (denormalized, no FK — same reasoning as `activity_log`) |
+| `actor_email` | VARCHAR(255) | nullable |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+
+No `updated_at`/`updated_by`: like `activity_log`, this is an immutable append-only log — every generate/regenerate attempt (success or failure) gets its own row, never updated in place. A `FAILED` row is written via a `REQUIRES_NEW` transaction specifically so it survives even when the triggering request's own transaction rolls back (see `ARCHITECTURE.md` §6, `GenerationFailureRecorder`).
+
+### `content_drafts` (Module 4)
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | UUID | PRIMARY KEY |
+| `generated_content_id` | UUID | nullable, FK → `generated_content(id)` **ON DELETE SET NULL** |
+| `media_id` | UUID | nullable, FK → `media(id)` **ON DELETE SET NULL** |
+| `content_type` | VARCHAR(40) | NOT NULL (denormalized from the source `generated_content` at creation time) |
+| `title` | VARCHAR(200) | NOT NULL (defaults to `"<Content Type> Draft"` if not supplied at creation) |
+| `content_text` | TEXT | NOT NULL (copied from the source's `generated_text` at creation, then independently editable) |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT `'DRAFT'` — enum `DraftStatus`: `DRAFT`, `READY_FOR_REVIEW`, `APPROVED`, `REJECTED`, `PUBLISHED`, `ARCHIVED` |
+| `is_deleted` | BOOLEAN | NOT NULL, DEFAULT `FALSE` (soft delete — restorable via `POST /api/drafts/{id}/restore`) |
+| `deleted_at` | TIMESTAMPTZ | nullable |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | — | JPA auditing columns |
+
+Business rule enforced at the service layer (not a DB constraint, for a clearer error message than a raw constraint violation): only one non-deleted draft per `generated_content_id` may be `APPROVED` at a time (`DraftRepository.existsByGeneratedContentIdAndStatusAndDeletedFalseAndIdNot`).
+
 ## 3. Relationships
 
 | Relationship | Cardinality | Enforcement |
@@ -169,14 +333,20 @@ This table has no rows written by any current code path — it exists so a futur
 | `users` → `password_reset_tokens` | 1 → N | Database FK, `ON DELETE CASCADE` |
 | `users` → `activity_log` | logical 1 → N (by `actor_id`) | **Not** a database FK — denormalized by design (see §1) |
 | `users` → `notifications` | logical 1 → N (by `recipient_id`) | **Not** a database FK — denormalized by design (see §1) |
+| `media` → `generated_content` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `media` → `content_drafts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `prompt_templates` → `generated_content` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `generated_content` → `generation_history` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
+| `generated_content` → `content_drafts` | 0..1 → N | Database FK, `ON DELETE SET NULL` |
 
-`app_settings` has no relationships to any other table.
+`app_settings` has no relationships to any other table. Every FK introduced in Modules 2–4 uses `ON DELETE SET NULL` rather than `CASCADE` or a hard `@ManyToOne` — deleting a `media`/`generated_content`/`prompt_templates` row never cascades or fails; dependent rows just lose the back-reference and keep whatever they've denormalized for their own display (see `ARCHITECTURE.md` §15).
 
 ## 4. Constraints
 
-- `users.email`, `refresh_tokens.token_hash`, `password_reset_tokens.token_hash`, and `app_settings.setting_key` all carry a `UNIQUE` constraint.
+- `users.email`, `refresh_tokens.token_hash`, `password_reset_tokens.token_hash`, `app_settings.setting_key`, and `media.storage_key` all carry a `UNIQUE` constraint.
 - `refresh_tokens.user_id` and `password_reset_tokens.user_id` are `NOT NULL` foreign keys with `ON DELETE CASCADE` — deleting a user immediately invalidates all of their tokens.
-- All boolean flags (`is_active`, `revoked`, `used`, `is_read`, `is_secret`) are `NOT NULL` with an explicit `DEFAULT`.
+- `prompt_templates` has a **partial unique index** — `UNIQUE (content_type) WHERE is_active = TRUE` — enforcing exactly one active template per content type at the database level (not just the application layer).
+- All boolean flags (`is_active`, `revoked`, `used`, `is_read`, `is_secret`, `is_deleted`, `is_draft`, `is_edited`) are `NOT NULL` with an explicit `DEFAULT`.
 - All timestamp columns use `TIMESTAMPTZ` (timezone-aware), and Hibernate is configured with `hibernate.jdbc.time_zone: UTC` so every stored instant is unambiguous.
 
 ## 5. Indexes
@@ -194,8 +364,22 @@ This table has no rows written by any current code path — it exists so a futur
 | `idx_notifications_recipient_unread` | `notifications` | `recipient_id, is_read` | Unread-count / inbox queries |
 | `idx_notifications_created_at` | `notifications` | `created_at DESC` | Recent-first listing |
 | `idx_app_settings_category` | `app_settings` | `category` | Grouped settings retrieval |
+| `idx_media_deleted_type` | `media` | `is_deleted, media_type` | Media library listing filtered by type |
+| `idx_media_created_at` | `media` | `created_at DESC` | Recent-first listing |
+| `idx_prompt_templates_active_per_type` | `prompt_templates` | `content_type` (unique, partial `WHERE is_active`) | Resolving the active template at generation time; enforces the one-active-per-type rule |
+| `idx_prompt_templates_content_type` | `prompt_templates` | `content_type` | Version history lookup |
+| `idx_generated_content_media` | `generated_content` | `media_id` | "content generated from this media" queries |
+| `idx_generated_content_type` | `generated_content` | `content_type` | Filtering the content library by type |
+| `idx_generated_content_created_at` | `generated_content` | `created_at DESC` | Recent-first listing |
+| `idx_generation_history_content` | `generation_history` | `generated_content_id` | History for one piece of content |
+| `idx_generation_history_created_at` | `generation_history` | `created_at DESC` | Recent-first listing |
+| `idx_content_drafts_generated_content` | `content_drafts` | `generated_content_id` | Duplicate-final-draft check, source lookup |
+| `idx_content_drafts_status` | `content_drafts` | `status` | Status filter on `GET /api/drafts` |
+| `idx_content_drafts_content_type` | `content_drafts` | `content_type` | Content-type filter on `GET /api/drafts` |
+| `idx_content_drafts_created_at` | `content_drafts` | `created_at DESC` | Recent-first listing |
+| `idx_content_drafts_deleted` | `content_drafts` | `is_deleted` | Default "exclude trash" filter |
 
-Every index above backs an actual repository query method that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`) — none are speculative.
+Every index above backs an actual repository query method or `Specification` predicate that exists in the codebase today (e.g. `UserRepository.findByEmailIgnoreCase`, `RefreshTokenRepository.findByUserIdAndRevokedFalse`, `DraftSpecifications`) — none are speculative.
 
 ## 6. Flyway Migrations
 
@@ -203,17 +387,19 @@ Every index above backs an actual repository query method that exists in the cod
 |---|---|---|---|
 | `V1` | `V1__init_schema.sql` | Module 0 | `activity_log`, `notifications`, `app_settings` + their indexes |
 | `V2` | `V2__auth_and_users.sql` | Module 1 | `users`, `refresh_tokens`, `password_reset_tokens` + their indexes and foreign keys |
+| `V3` | `V3__media.sql` | Module 2 | `media` + its indexes |
+| `V4` | `V4__ai_content_generation.sql` | Module 3 | `prompt_templates`, `generated_content`, `generation_history` + their indexes and foreign keys |
+| `V5` | `V5__prompt_template_seed.sql` | Module 3 | Seeds one active `prompt_templates` row per content type (17 rows) |
+| `V6` | `V6__content_drafts.sql` | Module 4 | `content_drafts` + its indexes and foreign keys |
 
-Both have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed `AuthControllerIntegrationTest`, which boots a disposable Postgres container and runs both migrations before any test executes).
+All six have been applied successfully against a real PostgreSQL 16 instance (verified via `docker compose up` and via the Testcontainers-backed integration tests for each module, each of which boots a disposable Postgres container and runs every migration before its tests execute).
 
 ## 7. Future Database Roadmap
 
 Not yet designed or migrated — listed here only to show what the current schema deliberately leaves room for, not as a commitment to a specific column layout:
 
-- **Media** table(s) for the Media Upload module (file metadata, MinIO object keys, upload type).
-- **Content draft** table(s) for AI-generated content (versioned, linked to media).
-- **Approval** state/audit table(s) for the approval workflow (may reuse `activity_log` rather than a new table).
-- **Publish record** table(s) for Instagram/website publishing history.
+- **Approval** state/audit table(s) for the approval workflow (may reuse `activity_log` rather than a new table, or extend `content_drafts.status` with an approval-specific sub-table for reviewer comments).
+- **Publish record** table(s) for Instagram/website publishing history, most likely referencing `content_drafts(id)` the same `ON DELETE SET NULL` way Module 4 references `generated_content`.
 - **Schedule** table(s) for the scheduler module.
 - Full CRUD usage of the existing `app_settings` table by the Application Settings module.
 - Possible introduction of additional `Role` enum values (e.g. `EDITOR`) — the `users.role` column already supports this without a migration, since it is a plain `VARCHAR` validated at the application layer, not a database `CHECK`/`ENUM` type.

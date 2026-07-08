@@ -10,6 +10,7 @@ public enum ActivityAction {
     REJECT,
     PUBLISH,
     SCHEDULE,
+    RESTORE,
     LOGIN,
     LOGIN_FAILED,
     LOGOUT,

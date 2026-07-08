@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, Eye, Loader2, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Check, Copy, Eye, FileText, Loader2, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { CONTENT_TYPE_LABELS } from "@/lib/content-type-labels";
 import { deleteContent, regenerateContent, updateContent } from "@/lib/api/ai";
+import { createDraft } from "@/lib/api/drafts";
+import { ApiError } from "@/lib/api/client";
 import type { GeneratedContent } from "@/types/ai";
 
 interface GeneratedContentCardProps {
@@ -44,6 +46,9 @@ export function GeneratedContentCard({ content, onChanged, onDeleted }: Generate
   const [editOpen, setEditOpen] = useState(false);
   const [editText, setEditText] = useState(content.generatedText ?? "");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isSavingToDrafts, setIsSavingToDrafts] = useState(false);
+  const [savedToDrafts, setSavedToDrafts] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
 
   async function handleRegenerate() {
     setIsRegenerating(true);
@@ -89,6 +94,21 @@ export function GeneratedContentCard({ content, onChanged, onDeleted }: Generate
       onDeleted(content.id);
     } finally {
       setIsDeleting(false);
+    }
+  }
+
+  async function handleSaveToDrafts() {
+    setIsSavingToDrafts(true);
+    setDraftError(null);
+    try {
+      await createDraft({ generatedContentId: content.id });
+      setSavedToDrafts(true);
+      setTimeout(() => setSavedToDrafts(false), 2000);
+    } catch (err) {
+      setDraftError(err instanceof ApiError ? err.message : "Could not save draft");
+      setTimeout(() => setDraftError(null), 3000);
+    } finally {
+      setIsSavingToDrafts(false);
     }
   }
 
@@ -141,6 +161,16 @@ export function GeneratedContentCard({ content, onChanged, onDeleted }: Generate
           {isRegenerating ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
           Regenerate
         </Button>
+        {content.status === "SUCCESS" && (
+          <Button variant="ghost" size="sm" onClick={handleSaveToDrafts} disabled={isSavingToDrafts}>
+            {isSavingToDrafts ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FileText className="size-3.5" />
+            )}
+            {draftError ? draftError : savedToDrafts ? "Saved to Drafts" : "Save as Draft"}
+          </Button>
+        )}
         <AlertDialog>
           <AlertDialogTrigger render={<Button variant="ghost" size="sm" className="text-destructive" />}>
             <Trash2 className="size-3.5" />

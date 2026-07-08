@@ -111,7 +111,14 @@ com.arjunsports.contentagent
 ├── modules/
 │   ├── auth/                        Login/logout/refresh/change-password/forgot-reset password
 │   ├── user/                        User entity, roles, admin bootstrap, user CRUD (admin-only)
-│   └── settings/                    AppSetting entity scaffold only (no service/controller yet)
+│   ├── settings/                    AppSetting entity scaffold only (no service/controller yet)
+│   ├── media/                       Media entity + validation rules, upload/list/delete (Module 2)
+│   ├── ai/                          PromptTemplate/GeneratedContent/GenerationHistory, AIProvider abstraction (Module 3)
+│   │   ├── provider/                AIProvider interface + OpenAICompatibleProvider, resolver, exceptions
+│   │   └── dto/
+│   └── draft/                       ContentDraft: save/edit/duplicate/restore/finalize workflow (Module 4)
+│       └── dto/
+├── storage/                         StorageService interface + MinioStorageServiceImpl, dual-endpoint MinioConfig (Module 2)
 └── security/                        JWT provider, cookie handling, filters, rate limiter
 ```
 
@@ -121,14 +128,17 @@ Each feature module under `modules/` follows Repository Pattern: `entity → rep
 
 | Pattern | Where | Why |
 |---|---|---|
-| Repository | `UserRepository`, `RefreshTokenRepository`, `PasswordResetTokenRepository`, `ActivityLogRepository`, `NotificationRepository`, `AppSettingRepository` | Spring Data JPA abstracts persistence behind an interface per aggregate. |
-| Service interface + impl | `AuthService`/`AuthServiceImpl`, `UserService`/`UserServiceImpl`, `RefreshTokenService`/`RefreshTokenServiceImpl`, `AuditLogService`/`AuditLogServiceImpl`, `NotificationService`/`InAppNotificationServiceImpl` | Controllers and other services depend on the interface, not the implementation — `NotificationService` in particular is designed so an email/WhatsApp implementation can be added later with zero caller changes. |
-| Strategy (implicit) | `NotificationService` interface with a single `InAppNotificationServiceImpl` today | Same reasoning as above; no second implementation exists yet. |
+| Repository | `UserRepository`, `RefreshTokenRepository`, `PasswordResetTokenRepository`, `ActivityLogRepository`, `NotificationRepository`, `AppSettingRepository`, `MediaRepository`, `PromptRepository`, `GeneratedContentRepository`, `GenerationHistoryRepository`, `DraftRepository` | Spring Data JPA abstracts persistence behind an interface per aggregate. |
+| Service interface + impl | `AuthService`, `UserService`, `RefreshTokenService`, `AuditLogService`, `NotificationService`, `MediaService`, `AIContentService`, `PromptService`, `DraftService` (each with a matching `*Impl`) | Controllers and other services depend on the interface, not the implementation — `NotificationService` in particular is designed so an email/WhatsApp implementation can be added later with zero caller changes. |
+| Strategy | `NotificationService` (single `InAppNotificationServiceImpl` today); `StorageService` (single `MinioStorageServiceImpl` today, swappable to AWS S3 by config only); `AIProvider` (single `OpenAICompatibleProvider` today, resolved by name via `AIProviderResolver` so Gemini/Claude/Azure/Ollama can be added as further implementations with zero caller changes) | Same reasoning across all three: callers depend only on the interface. |
+| Specification | `DraftSpecifications` composes optional search/status/contentType/mediaId filters for `GET /api/drafts` via `JpaSpecificationExecutor`, instead of an exploding number of derived query methods | The only endpoint so far needing free-text search combined with several independent optional filters plus pagination and sorting. |
 | DTO | Every request/response type under `*/dto` | Entities are never serialized directly to JSON. |
-| Global exception handling | `GlobalExceptionHandler` (`@RestControllerAdvice`) | Centralizes HTTP status mapping for all controller-thrown exceptions. |
+| Mapper | `DraftMapper` (entity → `DraftResponse`) | Modules 1–3 fold this into a static `Response.from(entity)` factory; Module 4 uses a dedicated `@Component` instead, since a curation-layer entity is more likely to need mapping logic that depends on more than just the entity itself later (e.g. resolving the source media/generated-content it was built from). |
+| Global exception handling | `GlobalExceptionHandler` (`@RestControllerAdvice`) | Centralizes HTTP status mapping for all controller-thrown exceptions; `ResourceNotFoundException`/`BadRequestException`/`ConflictException` are generic enough that Modules 2–4 reuse them as-is with no new exception types. |
 | Chain of Responsibility | Servlet filter chain: CORS → `JwtAuthenticationFilter` → Spring Security authorization → controller | Standard Spring Security filter chain composition. |
-| Builder | Lombok `@Builder` on `User`, `RefreshToken`, `PasswordResetToken`, `Notification`, `ActivityLog`, `AppSetting` | Readable, immutable-style entity construction. |
+| Builder | Lombok `@Builder` on `User`, `RefreshToken`, `PasswordResetToken`, `Notification`, `ActivityLog`, `AppSetting`, `Media`, `PromptTemplate`, `GeneratedContent`, `GenerationHistory`, `ContentDraft` | Readable, immutable-style entity construction. |
 | Template/Marker interface | `AuthenticatedActor` | Lets `common` (JPA auditing, audit log) resolve "who is acting" without depending on the concrete `User`/`UserPrincipal` type in `modules/user`. |
+| `REQUIRES_NEW` transaction escape hatch | `GenerationFailureRecorder` (Module 3) | A `FAILED` history/audit/notification record must survive even when the triggering `@Transactional` method re-throws and rolls back — a separate bean with `@Transactional(propagation = REQUIRES_NEW)` commits independently of the caller's transaction. |
 
 ## 7. Frontend Architecture
 
@@ -169,7 +179,7 @@ Session data flow: the `(dashboard)` layout is an `async` Server Component. It c
 - **Engine:** PostgreSQL 16.
 - **Migration tool:** Flyway, `spring.jpa.hibernate.ddl-auto: validate` — Hibernate is only ever allowed to *validate* that entity mappings match the schema Flyway created; it can never generate or alter DDL itself.
 - **Primary keys:** every table uses a `UUID` primary key generated **application-side** by Hibernate (`@UuidGenerator` on `BaseEntity`), not a database default — so migrations never depend on `pgcrypto`/`uuid-ossp`.
-- **Migrations applied so far:** `V1__init_schema.sql` (Module 0: `activity_log`, `notifications`, `app_settings`) and `V2__auth_and_users.sql` (Module 1: `users`, `refresh_tokens`, `password_reset_tokens`). Full detail in `DATABASE_DESIGN.md`.
+- **Migrations applied so far:** `V1__init_schema.sql` (Module 0: `activity_log`, `notifications`, `app_settings`), `V2__auth_and_users.sql` (Module 1: `users`, `refresh_tokens`, `password_reset_tokens`), `V3__media.sql` (Module 2: `media`), `V4__ai_content_generation.sql` (Module 3: `prompt_templates`, `generated_content`, `generation_history`), `V5__prompt_template_seed.sql` (Module 3: seeds the 17 default templates), and `V6__content_drafts.sql` (Module 4: `content_drafts`). Full detail in `DATABASE_DESIGN.md`.
 
 ## 9. Security Architecture
 
@@ -251,11 +261,12 @@ See §6 and §7 above for the annotated backend/frontend trees. The guiding rule
 
 ## 15. Future Module Integration Strategy
 
-Modules not yet built (media upload, AI content generation, drafts, approvals, Instagram/website publishing, scheduler, analytics, activity log viewer, notification center UI, settings UI) are expected to plug into infrastructure already in place rather than rebuild it:
+Modules not yet built (approvals, Instagram/website publishing, scheduler, analytics, activity log viewer, notification center UI, settings UI) are expected to plug into infrastructure already in place rather than rebuild it. Modules 2–4 confirmed this works in practice, not just in theory:
 
-- **Audit trail**: call `AuditLogService.record(...)` — already used by `AuthServiceImpl` and `UserServiceImpl`, no new wiring needed.
-- **Notifications**: call `NotificationService.notify(...)` — same interface Module 1 already uses for `LOGIN_SUCCESS`/`PASSWORD_CHANGED`.
-- **Authorization**: `@PreAuthorize("hasRole('ADMIN')")` (class- or method-level) is the established pattern; new roles are added by extending the `Role` enum, no filter-chain changes required.
-- **Settings**: the `AppSetting` entity/repository scaffold from Module 0 is ready for a full CRUD service + controller when the Application Settings module is built.
-- **Storage**: the MinIO container and client dependency are already provisioned; the Media Upload module adds the `StorageService` abstraction on top.
-- **Navigation**: every future page already has a placeholder route and a `lucide-react` icon registered in `frontend/src/lib/nav-config.ts` — building a module means replacing the placeholder page, not adding new routing/shell code.
+- **Audit trail**: call `AuditLogService.record(...)` — used by every module since Auth with zero changes to the interface. Module 4 needed one new `ActivityAction.RESTORE` constant (additive enum extension, not a signature change).
+- **Notifications**: call `NotificationService.notify(...)` — same interface since Module 1. Modules 3 and 4 each added their own `NotificationType` constants (`GENERATION_COMPLETED`/`GENERATION_FAILED`, `DRAFT_SAVED`/`DRAFT_UPDATED`/`DRAFT_DELETED`/`DRAFT_RESTORED`) without touching the service itself.
+- **Authorization**: `@PreAuthorize("hasRole('ADMIN')")` (class-level) is the established pattern for admin-only modules (Media, AI, Prompts, Drafts all use it identically); new roles are added by extending the `Role` enum, no filter-chain changes required.
+- **Settings**: the `AppSetting` entity/repository scaffold from Module 0 is still awaiting its full CRUD service + controller.
+- **Storage**: the MinIO container and client dependency, provisioned in Module 0, are used as-is by Module 2's `StorageService`.
+- **Navigation**: every future page already has a placeholder route and a `lucide-react` icon registered in `frontend/src/lib/nav-config.ts` — building a module means replacing the placeholder page and flipping its `status` to `"available"`, not adding new routing/shell code.
+- **Cross-module references without hard coupling**: Module 4's `ContentDraft.generatedContentId`/`mediaId` follow the same pattern Module 3 established for `GeneratedContent.mediaId` — a plain nullable UUID column with `ON DELETE SET NULL`, not a JPA `@ManyToOne`. Deleting a `Media` or `GeneratedContent` row never fails or cascades unexpectedly; dependents just lose the back-reference and keep their own denormalized copy of whatever they needed to display (e.g. `ContentDraft` keeps its own `contentType` and a snapshot of the text, independent of the source row's later edits or deletion).

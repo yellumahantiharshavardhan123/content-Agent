@@ -245,6 +245,42 @@ Incoming HTTP request
 
 **Explanation:** `common` has no dependency on any feature module — it is the shared foundation. `modules/auth` depends on `modules/user` (it authenticates and issues tokens *for* a `User`), never the other way around. `modules/settings` is a standalone scaffold with no other module depending on it yet. This ordering is why Module 1 could safely reuse `AuditLogService`/`NotificationService` without editing them — a new module can depend "downward" on `common` and, if needed, on `modules/user`, without the reverse ever being true.
 
+### Modules 2–4 extension
+
+```
+              ┌────────────────────┐
+              │       common/        │  (same shared foundation as above)
+              └──────────┬───────────┘
+                          │
+        ┌─────────────────┼──────────────────┐
+        ▼                                    ▼
+┌────────────────┐                 ┌────────────────────┐
+│   storage/       │                 │   modules/media/     │
+│ (StorageService,  │◀────────────────│ (Media, MediaService,│
+│  MinioConfig,     │  uses           │  MediaController)     │
+│  MinioStorageImpl)│                 └──────────┬───────────┘
+└────────────────┘                              │ mediaId (plain UUID,
+                                                  │ no @ManyToOne)
+                                                  ▼
+                                     ┌────────────────────┐
+                                     │    modules/ai/        │
+                                     │ (PromptTemplate,       │
+                                     │  GeneratedContent,     │
+                                     │  AIProvider + impls)  │
+                                     └──────────┬───────────┘
+                                                  │ generatedContentId
+                                                  │ (plain UUID, no @ManyToOne)
+                                                  ▼
+                                     ┌────────────────────┐
+                                     │   modules/draft/       │
+                                     │ (ContentDraft,         │
+                                     │  DraftService,         │
+                                     │  DraftController)      │
+                                     └────────────────────┘
+```
+
+**Explanation:** `modules/media` depends on `storage` (it needs somewhere to put files); `modules/ai` optionally references a `Media` row by id for generation context; `modules/draft` is created from a `modules/ai` `GeneratedContent` row. Critically, none of these are JPA `@ManyToOne` relationships — each dependency is a plain, nullable, indexed UUID column with `ON DELETE SET NULL` at the database level (see `DATABASE_DESIGN.md` §3–4). This means `modules/draft` never actually imports an entity class from `modules/ai`, and `modules/ai` never imports one from `modules/media` — the coupling is by convention (an id that happens to reference another table) rather than by compile-time dependency, so any of these modules could theoretically be deleted without a compilation error in the others. Only the *service* layer optionally does a live lookup (e.g. `DraftServiceImpl` calls `GeneratedContentRepository.findById(...)` when creating a draft, to copy its text) — that is a real Java-level dependency (`modules/draft` → `modules/ai`), but it is one-directional and matches the "depend downward only" rule Module 1 established.
+
 ## 9. Deployment Architecture
 
 ```

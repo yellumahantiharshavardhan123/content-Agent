@@ -1,7 +1,7 @@
 # API Documentation — Arjun Sports AI Content Agent
 
 **Base URL (local):** `http://localhost:8080/api`
-**Scope:** only endpoints that exist in the codebase today (Module 0 health check + Module 1 auth/user endpoints). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
+**Scope:** only endpoints that exist in the codebase today (Module 0 health check, Module 1 auth/user, Module 2 media, Module 3 AI generation/prompts, Module 4 content drafts). Interactive documentation is also available at `/swagger-ui.html` and `/api-docs` when the `dev` Spring profile is active (both are disabled in the `prod` profile).
 
 ## Response Envelope
 
@@ -47,9 +47,11 @@ List endpoints wrap a `PageResponse<T>` inside `data`:
 | 401 | Unauthorized | Missing/invalid/expired token, wrong credentials, `UnauthorizedException`, Spring Security's `RestAuthenticationEntryPoint` |
 | 403 | Forbidden | Authenticated but wrong role — `RestAccessDeniedHandler` |
 | 404 | Not found | `ResourceNotFoundException` |
-| 409 | Conflict | `ConflictException` (e.g. duplicate email) |
-| 429 | Too many requests | Login rate limiter exceeded |
+| 409 | Conflict | `ConflictException` (e.g. duplicate email, duplicate final draft) |
+| 413 | Payload too large | Uploaded file exceeds the type's max size |
+| 429 | Too many requests | Login or AI generation rate limiter exceeded |
 | 500 | Internal server error | Any uncaught exception (`GlobalExceptionHandler` fallback) |
+| 502/503/504 | AI provider error | `AIProviderException` — `INVALID_RESPONSE`/`UNKNOWN` → 502, `UNAVAILABLE` → 503, `TIMEOUT` → 504, `RATE_LIMITED` → 429 |
 
 ## Error Response Shape
 
@@ -312,3 +314,114 @@ Updates a user's profile, role, status, and active flag (email and password are 
 ```
 
 **Response `200`:** the updated `UserResponse`. **Errors:** `404` if the id does not exist; `400` on validation failure.
+
+---
+
+## Media APIs (Authenticated)
+
+### `POST /api/media/upload`
+
+Multipart upload. Fields: `file` (required), `description` (optional). Per-type limits: IMAGE 10MB, VIDEO 200MB, PDF 20MB, TEXT_NOTE 2MB; content-type is validated against an allow-list per type.
+
+**Response `200`:** the created `MediaResponse` (`id`, `fileName`, `mediaType`, `contentType`, `fileSizeBytes`, `description`, `url` — a presigned GET URL, `createdAt`). **Errors:** `400` invalid/oversized file; `413` if the file exceeds Spring's global max upload size.
+
+### `GET /api/media`
+
+Paginated, non-deleted media list. Query params: `page`, `size`, `sort`, optional `mediaType`.
+
+### `DELETE /api/media/{id}`
+
+Soft-deletes the media row (the object itself is not removed from storage). **Errors:** `404` if not found or already deleted.
+
+---
+
+## AI Content Generation APIs (ADMIN only)
+
+### `POST /api/ai/generate`
+
+**Request:**
+```json
+{
+  "mediaId": null,
+  "contentType": "INSTAGRAM_CAPTION",
+  "manualNotes": "Team won gold at the regional championship",
+  "eventDetails": null,
+  "achievement": "1st place, Regional Championship",
+  "competitionResults": null,
+  "trainingSession": null,
+  "coachNotes": null
+}
+```
+At least one context field (or `mediaId` with a description) must be non-blank. `contentType` must be one of the 17 supported types.
+
+**Response `200`:** the created `GeneratedContentResponse` (`id`, `mediaId`, `contentType`, `promptTemplateId`, `generatedText`, `aiModel`, `status`, `errorMessage`, `draft`, `edited`, timestamps). **Errors:** `400` no context provided or no active template for the type; `429` rate limit (10/min/user); `502`/`503`/`504` provider error (a `FAILED` row is still persisted to `generation_history`).
+
+### `POST /api/ai/regenerate`
+
+**Request:** `{ "contentId": "<uuid>" }`. Re-runs the same resolved prompt through the same template. **Response `200`:** the updated `GeneratedContentResponse`. **Errors:** `404` unknown id; `400` content has no associated prompt template.
+
+### `GET /api/ai/history`
+
+Paginated `GenerationHistoryResponse` list (every generate/regenerate attempt, success or failure), newest first.
+
+### `GET /api/ai/content` / `GET /api/ai/content/{id}`
+
+Paginated list (optional `mediaId`, `contentType` filters) or single-item lookup.
+
+### `PUT /api/ai/content/{id}`
+
+**Request:** `{ "generatedText": "...", "draft": true }`. Marks `edited: true` if the text changed. **Response `200`:** the updated item.
+
+### `DELETE /api/ai/content/{id}`
+
+Hard-deletes the generated content row.
+
+---
+
+## Prompt Template APIs (ADMIN only)
+
+### `GET /api/prompts`
+
+Lists all active prompt templates (one per content type).
+
+### `PUT /api/prompts/{id}`
+
+**Request:** `{ "systemPrompt": "...", "userPromptTemplate": "..." }`. Deactivates the current version and inserts a new one at `version + 1` for the same content type — templates are never mutated in place, so history is preserved. **Response `200`:** the newly-active `PromptTemplateResponse`.
+
+---
+
+## Content Draft APIs (ADMIN only)
+
+A curation layer on top of `generated_content` (Module 3) — see `ARCHITECTURE.md` for how `ContentDraft` relates to `GeneratedContent`.
+
+### `POST /api/drafts`
+
+**Request:** `{ "generatedContentId": "<uuid>", "title": "Regional Championship Recap" }` (`title` optional — defaults to `"<Content Type> Draft"`). Copies the source's `generatedText` into the new draft as `status: DRAFT`. **Errors:** `404` unknown `generatedContentId`; `400` if the source has no generated text.
+
+### `PUT /api/drafts/{id}`
+
+**Request:** `{ "title": "...", "contentText": "...", "status": "READY_FOR_REVIEW" }` (`status` optional, raw string — omit it to leave the status unchanged; this is also how a draft is moved back from `APPROVED` to `DRAFT`). **Errors:** `400` blank `contentText`, invalid `status` value, or the draft is soft-deleted; `409` if setting `status: APPROVED` would create a second final draft for the same source.
+
+### `DELETE /api/drafts/{id}`
+
+Soft-deletes (sets `deleted: true`, `deletedAt`). **Errors:** `400` if already deleted.
+
+### `GET /api/drafts`
+
+Paginated, searchable, filterable list. Query params: `page`, `size`, `sort`, `search` (matches title or content text, case-insensitive), `status`, `contentType`, `mediaId`, `includeDeleted` (default `false`). **Errors:** `400` invalid `status` value.
+
+### `GET /api/drafts/{id}`
+
+Single draft lookup (works regardless of deleted state, so a trashed draft can still be previewed before restoring).
+
+### `POST /api/drafts/{id}/duplicate`
+
+Creates an independent copy (`title` suffixed `" (Copy)"`, `status` reset to `DRAFT`). **Errors:** `400` if the source draft is deleted.
+
+### `POST /api/drafts/{id}/restore`
+
+Clears the soft-delete flag. **Errors:** `400` if the draft is not deleted.
+
+### `POST /api/drafts/{id}/finalize`
+
+Transitions the draft to `APPROVED`. **Errors:** `409` if already `APPROVED`/`PUBLISHED`/`ARCHIVED`, or if another non-deleted draft for the same `generatedContentId` is already `APPROVED`.
